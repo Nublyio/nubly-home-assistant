@@ -68,33 +68,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     data = dict(entry.data)
 
-    if data.get(CONF_DEVICE_ID) == LEGACY_DEVICE_ID:
-        _LOGGER.warning(
-            "NUBLY HA: entry still uses legacy device_id %s, rediscovering",
-            LEGACY_DEVICE_ID,
-        )
-        discovered = await async_discover_devices(hass)
-        if discovered:
-            new_device_id = sorted(discovered)[0]
-            _LOGGER.info(
-                "NUBLY HA: updating device_id %s -> %s",
-                LEGACY_DEVICE_ID,
-                new_device_id,
-            )
-            data[CONF_DEVICE_ID] = new_device_id
-            hass.config_entries.async_update_entry(
-                entry, data=data, unique_id=new_device_id
-            )
-            await _clear_legacy_config(hass)
-        else:
+    try:
+        if data.get(CONF_DEVICE_ID) == LEGACY_DEVICE_ID:
             _LOGGER.warning(
-                "NUBLY HA: no Nubly devices responded; keeping legacy id"
+                "NUBLY HA: entry still uses legacy device_id %s, rediscovering",
+                LEGACY_DEVICE_ID,
             )
+            discovered = await async_discover_devices(hass)
+            _LOGGER.warning("NUBLY HA: rediscovery returned %s", discovered)
+            if discovered:
+                new_device_id = sorted(discovered)[0]
+                _LOGGER.warning(
+                    "NUBLY HA: updating device_id %s -> %s",
+                    LEGACY_DEVICE_ID,
+                    new_device_id,
+                )
+                data[CONF_DEVICE_ID] = new_device_id
+                hass.config_entries.async_update_entry(
+                    entry, data=data, unique_id=new_device_id
+                )
+                await _clear_legacy_config(hass)
+            else:
+                _LOGGER.warning(
+                    "NUBLY HA: no Nubly devices responded; keeping legacy id"
+                )
+    except Exception:
+        _LOGGER.exception("NUBLY HA: rediscovery block raised an exception")
 
     hass.data[DOMAIN][entry.entry_id] = data
 
-    await _publish_config(hass, data)
+    try:
+        await _publish_config(hass, data)
+    except Exception:
+        _LOGGER.exception("NUBLY HA: publish block raised an exception")
 
+    _LOGGER.warning("NUBLY HA: async_setup_entry completed")
     return True
 
 
@@ -127,13 +135,13 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     }
 
     weather_entity = data.get(CONF_WEATHER_ENTITY)
-    _LOGGER.info("WEATHER CONFIG: entity_id = %s", weather_entity)
+    _LOGGER.warning("WEATHER CONFIG: entity_id = %s", weather_entity)
     if weather_entity:
         payload["weather"] = {"entity_id": weather_entity}
 
     topic = f"nubly/devices/{device_id}/config"
-    _LOGGER.info("NUBLY HA: publishing config to topic = %s", topic)
-    _LOGGER.info("NUBLY HA: config payload = %s", payload)
+    _LOGGER.warning("NUBLY HA: publishing config to topic = %s", topic)
+    _LOGGER.warning("NUBLY HA: config payload = %s", payload)
 
     try:
         await hass.services.async_call(
@@ -150,13 +158,13 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
         _LOGGER.exception("NUBLY HA: config publish failed")
         return
 
-    _LOGGER.info("NUBLY HA: config publish ok")
+    _LOGGER.warning("NUBLY HA: config publish ok")
 
 
 async def _clear_legacy_config(hass: HomeAssistant) -> None:
     """Remove the retained config at the old hardcoded legacy topic."""
     legacy_topic = f"nubly/devices/{LEGACY_DEVICE_ID}/config"
-    _LOGGER.info("NUBLY HA: clearing old config topic = %s", legacy_topic)
+    _LOGGER.warning("NUBLY HA: clearing old config topic = %s", legacy_topic)
     await hass.services.async_call(
         "mqtt",
         "publish",
