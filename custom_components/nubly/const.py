@@ -9,10 +9,11 @@ CONF_LIGHT_ENTITY = "light_entity"
 CONF_LIGHT_DISPLAY_NAME = "light_display_name"
 CONF_WEATHER_ENTITY = "weather_entity"
 
-# Nubly devices publish a retained status message on this topic so HA can
-# discover their hardware-generated device_id (format: nubly_<12 hex chars>).
-# Topic: nubly/devices/<device_id>/status
-DISCOVERY_SUB_TOPIC = "nubly/devices/+/status"
+# Nubly devices publish a retained JSON attributes message on this topic so HA
+# can discover their hardware-generated device_id (format: nubly_<12 hex chars>).
+# Topic: nubly/devices/<device_id>/attributes
+# Payload: {"device_id": "nubly_...", ...}
+DISCOVERY_SUB_TOPIC = "nubly/devices/+/attributes"
 
 # Seconds to listen for device announcements during a discovery round.
 DISCOVERY_TIMEOUT = 3.0

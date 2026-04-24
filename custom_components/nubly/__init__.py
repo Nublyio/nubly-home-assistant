@@ -65,9 +65,35 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Nubly from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = entry.data
 
-    await _publish_config(hass, entry.data)
+    data = dict(entry.data)
+
+    if data.get(CONF_DEVICE_ID) == LEGACY_DEVICE_ID:
+        _LOGGER.warning(
+            "NUBLY HA: entry still uses legacy device_id %s, rediscovering",
+            LEGACY_DEVICE_ID,
+        )
+        discovered = await async_discover_devices(hass)
+        if discovered:
+            new_device_id = sorted(discovered)[0]
+            _LOGGER.info(
+                "NUBLY HA: updating device_id %s -> %s",
+                LEGACY_DEVICE_ID,
+                new_device_id,
+            )
+            data[CONF_DEVICE_ID] = new_device_id
+            hass.config_entries.async_update_entry(
+                entry, data=data, unique_id=new_device_id
+            )
+            await _clear_legacy_config(hass)
+        else:
+            _LOGGER.warning(
+                "NUBLY HA: no Nubly devices responded; keeping legacy id"
+            )
+
+    hass.data[DOMAIN][entry.entry_id] = data
+
+    await _publish_config(hass, data)
 
     return True
 
@@ -121,3 +147,19 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     )
 
     _LOGGER.info("NUBLY HA: config publish ok")
+
+
+async def _clear_legacy_config(hass: HomeAssistant) -> None:
+    """Remove the retained config at the old hardcoded legacy topic."""
+    legacy_topic = f"nubly/devices/{LEGACY_DEVICE_ID}/config"
+    _LOGGER.info("NUBLY HA: clearing old config topic = %s", legacy_topic)
+    await hass.services.async_call(
+        "mqtt",
+        "publish",
+        {
+            "topic": legacy_topic,
+            "payload": "",
+            "qos": 0,
+            "retain": True,
+        },
+    )
