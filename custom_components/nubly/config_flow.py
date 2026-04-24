@@ -5,6 +5,7 @@ import logging
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -36,6 +37,7 @@ from .discovery import async_discover_devices
 
 _LOGGER = logging.getLogger(__name__)
 
+
 CONFIGURE_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_ROOM_NAME): str,
@@ -61,6 +63,11 @@ CONFIGURE_SCHEMA = vol.Schema(
 )
 
 
+def _ha_mqtt_available(hass: HomeAssistant) -> bool:
+    """Return True if HA's MQTT integration has an active config entry."""
+    return bool(hass.config_entries.async_entries("mqtt"))
+
+
 class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Nubly."""
 
@@ -82,6 +89,9 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
             discovery_info.host,
             discovery_info.port,
         )
+        if not _ha_mqtt_available(self.hass):
+            return self.async_abort(reason="mqtt_not_configured")
+
         host = discovery_info.host
         port = discovery_info.port
         props = {
@@ -117,6 +127,9 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input=None):
         """Manual entry point: fall back to MQTT discovery."""
+        if not _ha_mqtt_available(self.hass):
+            return self.async_abort(reason="mqtt_not_configured")
+
         found = await async_discover_devices(self.hass)
         self._discovered = sorted(found)
 
@@ -154,21 +167,19 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="manual", data_schema=schema)
 
     async def async_step_configure(self, user_input=None):
-        """Collect room, entities, weather, and screensaver timeout."""
+        """Collect room, entities, weather and screensaver timeout."""
         if user_input is not None:
-            if self.unique_id is None:
+            if self.unique_id is None and self._device_id:
                 await self.async_set_unique_id(self._device_id)
                 self._abort_if_unique_id_configured()
 
             data = {**self._discovery_fields, **user_input}
+            title = user_input.get(CONF_ROOM_NAME) or self._device_id
             _LOGGER.warning(
                 "NUBLY HA: config entry created for device_id = %s",
                 self._device_id,
             )
-            return self.async_create_entry(
-                title=user_input[CONF_ROOM_NAME],
-                data=data,
-            )
+            return self.async_create_entry(title=title, data=data)
 
         return self.async_show_form(
             step_id="configure",

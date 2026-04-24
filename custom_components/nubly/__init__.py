@@ -118,6 +118,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("NUBLY HA: publish block raised an exception")
 
+    try:
+        await _clear_legacy_config(hass)
+    except Exception:
+        _LOGGER.exception("NUBLY HA: legacy cleanup raised an exception")
+
     _LOGGER.warning("NUBLY HA: async_setup_entry completed")
     return True
 
@@ -153,13 +158,14 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     }
 
     weather_entity = data.get(CONF_WEATHER_ENTITY)
-    _LOGGER.warning("WEATHER CONFIG: entity_id = %s", weather_entity)
     if weather_entity:
         payload["weather"] = {"entity_id": weather_entity}
 
     topic = f"nubly/devices/{device_id}/config"
+    _LOGGER.warning("NUBLY HA: using HA MQTT integration = true")
     _LOGGER.warning("NUBLY HA: publishing config to topic = %s", topic)
     _LOGGER.warning("NUBLY HA: config payload = %s", payload)
+    _LOGGER.warning("NUBLY HA: publishing config retained = true")
 
     try:
         await hass.services.async_call(
@@ -182,7 +188,7 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
 async def _clear_legacy_config(hass: HomeAssistant) -> None:
     """Remove the retained config at the old hardcoded legacy topic."""
     legacy_topic = f"nubly/devices/{LEGACY_DEVICE_ID}/config"
-    _LOGGER.warning("NUBLY HA: clearing old config topic = %s", legacy_topic)
+    _LOGGER.warning("NUBLY HA: clearing legacy config topic = %s", legacy_topic)
     await hass.services.async_call(
         "mqtt",
         "publish",

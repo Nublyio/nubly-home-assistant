@@ -1,0 +1,21 @@
+{
+  "config": {
+    "abort": {
+      "mqtt_not_configured": "MQTT integration is required for Nubly.",
+      "missing_device_id": "Discovered device did not advertise a device_id.",
+      "already_configured": "This Nubly device is already configured."
+    },
+    "step": {
+      "configure": {
+        "title": "Configure Nubly",
+        "description": "Device {device_id}"
+      },
+      "pick_device": {
+        "title": "Select Nubly device"
+      },
+      "manual": {
+        "title": "Enter Nubly device ID"
+      }
+    }
+  }
+}
