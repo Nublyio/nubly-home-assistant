@@ -13,16 +13,19 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_discover_devices(hass: HomeAssistant) -> set[str]:
-    """Listen briefly on MQTT and return the set of Nubly device_ids seen.
+    """Listen on MQTT and return the set of Nubly device_ids seen.
 
-    Reads `device_id` out of the JSON payload published to
-    `nubly/devices/+/attributes` rather than relying on the topic segment,
-    since the firmware treats the attributes payload as source of truth.
+    Subscribes to `nubly/devices/+/attributes` and extracts `device_id` from
+    the JSON payload. Returns as soon as the first device is seen; otherwise
+    waits up to DISCOVERY_TIMEOUT seconds.
     """
     found: set[str] = set()
+    first_seen = asyncio.Event()
 
     @callback
     def on_message(msg) -> None:
+        _LOGGER.info("NUBLY HA: attributes received topic = %s", msg.topic)
+
         payload = msg.payload
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8", errors="replace")
@@ -30,8 +33,10 @@ async def async_discover_devices(hass: HomeAssistant) -> set[str]:
         try:
             data = json.loads(payload)
         except (json.JSONDecodeError, TypeError):
-            _LOGGER.debug(
-                "NUBLY HA: non-JSON attributes payload on %s", msg.topic
+            _LOGGER.warning(
+                "NUBLY HA: non-JSON attributes payload on %s: %r",
+                msg.topic,
+                payload,
             )
             return
 
@@ -43,6 +48,13 @@ async def async_discover_devices(hass: HomeAssistant) -> set[str]:
         ):
             _LOGGER.info("NUBLY HA: discovered device_id = %s", device_id)
             found.add(device_id)
+            first_seen.set()
+
+    try:
+        await mqtt.async_wait_for_mqtt_client(hass)
+    except Exception:
+        _LOGGER.exception("NUBLY HA: MQTT client not ready")
+        return found
 
     try:
         unsub = await mqtt.async_subscribe(hass, DISCOVERY_SUB_TOPIC, on_message)
@@ -50,8 +62,17 @@ async def async_discover_devices(hass: HomeAssistant) -> set[str]:
         _LOGGER.exception("NUBLY HA: MQTT discovery subscribe failed")
         return found
 
+    _LOGGER.info(
+        "NUBLY HA: listening on %s for up to %.0fs",
+        DISCOVERY_SUB_TOPIC,
+        DISCOVERY_TIMEOUT,
+    )
+
     try:
-        await asyncio.sleep(DISCOVERY_TIMEOUT)
+        try:
+            await asyncio.wait_for(first_seen.wait(), timeout=DISCOVERY_TIMEOUT)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("NUBLY HA: no device attributes received yet")
     finally:
         unsub()
 

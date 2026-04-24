@@ -16,7 +16,7 @@ CONF_WEATHER_ENTITY = "weather_entity"
 DISCOVERY_SUB_TOPIC = "nubly/devices/+/attributes"
 
 # Seconds to listen for device announcements during a discovery round.
-DISCOVERY_TIMEOUT = 3.0
+DISCOVERY_TIMEOUT = 30.0
 
 # Hardcoded device_id used by the pre-hardware-ID version of this integration.
 LEGACY_DEVICE_ID = "nubly_gjesterom_display"

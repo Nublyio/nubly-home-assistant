@@ -135,16 +135,20 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     _LOGGER.info("NUBLY HA: publishing config to topic = %s", topic)
     _LOGGER.info("NUBLY HA: config payload = %s", payload)
 
-    await hass.services.async_call(
-        "mqtt",
-        "publish",
-        {
-            "topic": topic,
-            "payload": json.dumps(payload),
-            "qos": 0,
-            "retain": True,
-        },
-    )
+    try:
+        await hass.services.async_call(
+            "mqtt",
+            "publish",
+            {
+                "topic": topic,
+                "payload": json.dumps(payload),
+                "qos": 0,
+                "retain": True,
+            },
+        )
+    except Exception:
+        _LOGGER.exception("NUBLY HA: config publish failed")
+        return
 
     _LOGGER.info("NUBLY HA: config publish ok")
 
