@@ -21,6 +21,7 @@ from .const import (
     DOMAIN,
     LEGACY_DEVICE_ID,
 )
+from .commands import async_subscribe_commands
 from .discovery import async_discover_devices
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,6 +113,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=data.get(CONF_MODEL),
         sw_version=data.get(CONF_SW_VERSION),
     )
+
+    try:
+        unsub_commands = await async_subscribe_commands(hass, device_id)
+        entry.async_on_unload(unsub_commands)
+        _LOGGER.warning(
+            "NUBLY HA: subscribed to commands for device_id = %s", device_id
+        )
+    except Exception:
+        _LOGGER.exception("NUBLY HA: command subscribe failed")
 
     try:
         await _publish_config(hass, data)
