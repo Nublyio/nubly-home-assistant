@@ -129,8 +129,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Nubly config entry."""
-    hass.data[DOMAIN].pop(entry.entry_id)
+    hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Unprovision the device when its config entry is deleted."""
+    device_id = entry.data.get(CONF_DEVICE_ID)
+    _LOGGER.warning(
+        "NUBLY HA: removing config entry for device_id = %s", device_id
+    )
+    if not device_id:
+        return
+
+    config_topic = f"nubly/devices/{device_id}/config"
+    _LOGGER.warning(
+        "NUBLY HA: clearing retained config topic = %s", config_topic
+    )
+    try:
+        await hass.services.async_call(
+            "mqtt",
+            "publish",
+            {
+                "topic": config_topic,
+                "payload": "",
+                "qos": 0,
+                "retain": True,
+            },
+        )
+    except Exception:
+        _LOGGER.exception("NUBLY HA: failed to clear retained config")
+
+    command_topic = f"nubly/devices/{device_id}/command/unprovision"
+    try:
+        await hass.services.async_call(
+            "mqtt",
+            "publish",
+            {
+                "topic": command_topic,
+                "payload": "true",
+                "qos": 0,
+                "retain": False,
+            },
+        )
+        _LOGGER.warning("NUBLY HA: unprovision command sent")
+    except Exception:
+        _LOGGER.exception("NUBLY HA: failed to send unprovision command")
 
 
 async def _publish_config(hass: HomeAssistant, data: dict) -> None:
