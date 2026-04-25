@@ -6,6 +6,10 @@
       "already_configured": "This Nubly device is already configured."
     },
     "error": {
+      "supervisor_unavailable": "Home Assistant Supervisor is not available — automatic Mosquitto provisioning requires HAOS or Supervised.",
+      "mosquitto_user_add_failed": "Could not add the MQTT user to the Mosquitto add-on. Check Supervisor logs.",
+      "mosquitto_restart_failed": "Could not restart the Mosquitto add-on. Check Supervisor logs.",
+      "mqtt_reconnect_timeout": "MQTT did not reconnect after the Mosquitto restart. Try again in a moment.",
       "provisioning_failed": "Could not provision the Nubly device — check that it is online and reachable on the network."
     },
     "step": {

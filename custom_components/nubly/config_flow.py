@@ -178,11 +178,11 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
 
             host = self._discovery_fields.get(CONF_HOST)
             if host and self._device_id:
-                ok = await async_provision_device(
+                error_key = await async_provision_device(
                     self.hass, host, self._device_id
                 )
-                if not ok:
-                    errors["base"] = "provisioning_failed"
+                if error_key:
+                    errors["base"] = error_key
 
             if not errors:
                 data = {**self._discovery_fields, **user_input}
