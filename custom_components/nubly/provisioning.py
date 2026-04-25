@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import secrets
+import socket
 
 import aiohttp
 
@@ -37,6 +38,21 @@ PROVISION_TIMEOUT_SECONDS = 10
 MQTT_RECONNECT_TIMEOUT_SECONDS = 15
 DEFAULT_BROKER_HOST = "homeassistant.local"
 DEFAULT_BROKER_PORT = 1883
+
+# Hostnames that resolve only inside the Supervisor's Docker network and are
+# therefore unusable from a LAN device like the ESP32.
+_SUPERVISOR_INTERNAL_HOSTS = frozenset(
+    {
+        "core-mosquitto",
+        "core_mosquitto",
+        "homeassistant",
+        "supervisor",
+        "hassio",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
+)
 
 
 async def async_check_provisioning_support(hass: HomeAssistant) -> dict:
@@ -259,8 +275,9 @@ async def _async_post_provision(
     url = f"http://{host}:{PROVISION_PORT}/provision"
     _LOGGER.warning("NUBLY HA: provisioning device at %s", url)
 
+    broker_host = await _async_resolve_provision_broker_host(hass)
     payload = {
-        "mqtt_host": _get_broker_host(hass),
+        "mqtt_host": broker_host,
         "mqtt_port": _get_broker_port(hass),
         "mqtt_username": username,
         "mqtt_password": password,
@@ -269,6 +286,7 @@ async def _async_post_provision(
     _LOGGER.warning(
         "NUBLY HA: provisioning payload prepared for device_id = %s", device_id
     )
+    _LOGGER.warning("NUBLY HA: provisioning ESP32 mqtt_host = %s", broker_host)
 
     session = async_get_clientsession(hass)
     timeout = aiohttp.ClientTimeout(total=PROVISION_TIMEOUT_SECONDS)
@@ -301,6 +319,48 @@ def _get_broker_host(hass: HomeAssistant) -> str:
     if entries:
         return entries[0].data.get("broker") or DEFAULT_BROKER_HOST
     return DEFAULT_BROKER_HOST
+
+
+async def _async_resolve_provision_broker_host(hass: HomeAssistant) -> str:
+    """Return a broker host the ESP32 can actually reach over the LAN.
+
+    HA may store its broker as `core-mosquitto` (Supervisor-internal Docker
+    DNS), which the ESP32 can't resolve. When that's the case, substitute
+    with HA's LAN IP, detected via the kernel's routing table.
+    """
+    internal = _get_broker_host(hass)
+    _LOGGER.warning("NUBLY HA: MQTT broker internal host = %s", internal)
+
+    if internal.lower() not in _SUPERVISOR_INTERNAL_HOSTS:
+        _LOGGER.warning("NUBLY HA: MQTT broker provision host = %s", internal)
+        return internal
+
+    lan_ip = await _async_detect_lan_ip(hass)
+    resolved = lan_ip or internal
+    _LOGGER.warning("NUBLY HA: MQTT broker provision host = %s", resolved)
+    return resolved
+
+
+async def _async_detect_lan_ip(hass: HomeAssistant) -> str | None:
+    """Find the IP of the interface HA would use for outbound traffic."""
+
+    def _sync() -> str | None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # No packet is sent — connect() on UDP only consults the routing
+            # table, so any reachable-looking target works offline too.
+            sock.connect(("1.1.1.1", 80))
+            return sock.getsockname()[0]
+        except OSError:
+            return None
+        finally:
+            sock.close()
+
+    try:
+        return await hass.async_add_executor_job(_sync)
+    except Exception:
+        _LOGGER.exception("NUBLY HA: LAN IP detection failed")
+        return None
 
 
 def _get_broker_port(hass: HomeAssistant) -> int:
