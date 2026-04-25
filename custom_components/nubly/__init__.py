@@ -24,6 +24,7 @@ from .const import (
 )
 from .commands import async_subscribe_commands
 from .discovery import async_discover_devices
+from .provisioning import async_check_provisioning_support
 from .view import NublyCoverArtView
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Nubly integration."""
     hass.data.setdefault(DOMAIN, {})
     _register_cover_art_view(hass)
+    await _async_check_provisioning_once(hass)
     return True
 
 
@@ -75,6 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Nubly from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     _register_cover_art_view(hass)
+    await _async_check_provisioning_once(hass)
 
     data = dict(entry.data)
 
@@ -251,6 +254,15 @@ def _register_cover_art_view(hass: HomeAssistant) -> None:
     if hass.data[DOMAIN].get(flag_key):
         return
     hass.http.register_view(NublyCoverArtView(hass))
+    hass.data[DOMAIN][flag_key] = True
+
+
+async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
+    """Run the provisioning detection probe once per HA process."""
+    flag_key = "_provisioning_checked"
+    if hass.data[DOMAIN].get(flag_key):
+        return
+    await async_check_provisioning_support(hass)
     hass.data[DOMAIN][flag_key] = True
 
 
