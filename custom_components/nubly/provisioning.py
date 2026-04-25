@@ -125,8 +125,9 @@ async def async_provision_device(
         )
         return "supervisor_unavailable"
 
-    username = f"nubly_{device_id}"
+    username = device_id if device_id.startswith("nubly_") else f"nubly_{device_id}"
     password = secrets.token_urlsafe(32)
+    _LOGGER.warning("NUBLY HA: generated MQTT username = %s", username)
 
     if not await _async_add_mosquitto_user(hass, token, username, password):
         return "mosquitto_user_add_failed"
@@ -199,7 +200,7 @@ async def _async_add_mosquitto_user(
         _LOGGER.exception("NUBLY HA: failed to update mosquitto options")
         return False
 
-    _LOGGER.warning("NUBLY HA: added MQTT user %s to Mosquitto", username)
+    _LOGGER.warning("NUBLY HA: added MQTT user to Mosquitto")
     return True
 
 
