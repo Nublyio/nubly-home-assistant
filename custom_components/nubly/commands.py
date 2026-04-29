@@ -16,6 +16,8 @@ _COMMAND_MAP: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "light/brightness_set": ("light", "turn_on", ("entity_id", "brightness_pct")),
     "media/play_pause": ("media_player", "media_play_pause", ("entity_id",)),
     "media/next_track": ("media_player", "media_next_track", ("entity_id",)),
+    "media/previous_track": ("media_player", "media_previous_track", ("entity_id",)),
+    "media/seek": ("media_player", "media_seek", ("entity_id", "seek_position")),
     "media/volume_set": ("media_player", "volume_set", ("entity_id", "volume_level")),
 }
 
@@ -63,9 +65,23 @@ async def async_subscribe_commands(hass: HomeAssistant, device_id: str):
             _LOGGER.warning("NUBLY HA: missing entity_id for command %s", command)
             return
 
-        _LOGGER.debug(
-            "NUBLY HA: calling service = %s.%s", domain, service
-        )
+        if command == "media/previous_track":
+            _LOGGER.info("NUBLY HA: media previous command received")
+            _LOGGER.info(
+                "NUBLY HA: calling media_player.media_previous_track for %s",
+                service_data.get("entity_id"),
+            )
+        elif command == "media/seek":
+            _LOGGER.info("NUBLY HA: media seek command received")
+            _LOGGER.info(
+                "NUBLY HA: calling media_player.media_seek position = %s",
+                service_data.get("seek_position"),
+            )
+        else:
+            _LOGGER.debug(
+                "NUBLY HA: calling service = %s.%s", domain, service
+            )
+
         hass.async_create_task(
             _async_call_service(hass, domain, service, service_data)
         )
