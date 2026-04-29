@@ -34,6 +34,8 @@ _LOGGER = logging.getLogger(__name__)
 _PUBLISH_MAX_ATTEMPTS = 5
 _PUBLISH_RETRY_DELAY_SECONDS = 2
 
+PLATFORMS = ["update"]
+
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Nubly integration."""
@@ -147,6 +149,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("NUBLY HA: legacy cleanup raised an exception")
 
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     _LOGGER.info(
         "NUBLY HA: integration setup completed for device_id = %s", device_id
     )
@@ -155,8 +159,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Nubly config entry."""
-    hass.data[DOMAIN].pop(entry.entry_id, None)
-    return True
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, PLATFORMS
+    )
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+    return unload_ok
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
