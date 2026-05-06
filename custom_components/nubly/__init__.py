@@ -117,7 +117,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("NUBLY HA: rediscovery block raised an exception")
 
+    if entry.options:
+        data.update(entry.options)
+
     hass.data[DOMAIN][entry.entry_id] = data
+
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     device_id = data[CONF_DEVICE_ID]
     dev_reg = dr.async_get(hass)
@@ -155,6 +160,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "NUBLY HA: integration setup completed for device_id = %s", device_id
     )
     return True
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Republish retained MQTT config when options change.
+
+    No Wi-Fi/MQTT provisioning, no Mosquitto restart, no /provision POST —
+    only the HA config payload is updated.
+    """
+    data = {**entry.data, **entry.options}
+    hass.data[DOMAIN][entry.entry_id] = data
+
+    device_id = data.get(CONF_DEVICE_ID)
+    _LOGGER.info(
+        "NUBLY HA: options updated for device_id = %s, republishing config",
+        device_id,
+    )
+
+    if device_id:
+        dev_reg = dr.async_get(hass)
+        device = dev_reg.async_get_device(identifiers={(DOMAIN, device_id)})
+        if device is not None:
+            new_name = data.get(CONF_ROOM_NAME) or device_id
+            if device.name != new_name:
+                dev_reg.async_update_device(device.id, name=new_name)
+
+    try:
+        await _publish_config(hass, data)
+    except Exception:
+        _LOGGER.exception("NUBLY HA: republish on options update failed")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -25,5 +25,13 @@
         "title": "Enter Nubly device ID"
       }
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nubly settings",
+        "description": "Update room and entity settings. Changes are sent to the device over MQTT."
+      }
+    }
   }
 }

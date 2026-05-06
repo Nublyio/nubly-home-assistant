@@ -4,8 +4,8 @@ import logging
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -77,6 +77,12 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Nubly."""
 
     VERSION = 2
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow for editing an existing entry."""
+        return NublyOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         self._discovered: list[str] = []
@@ -202,4 +208,74 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=CONFIGURE_SCHEMA,
             description_placeholders={"device_id": self._device_id or ""},
             errors=errors,
+        )
+
+
+class NublyOptionsFlow(OptionsFlow):
+    """Edit settings of an already-configured Nubly device.
+
+    Republishes the retained MQTT config payload only. Does not re-run
+    Wi-Fi/MQTT provisioning or restart Mosquitto.
+    """
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        self._config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        if user_input is not None:
+            cleaned = {k: v for k, v in user_input.items() if v is not None}
+            return self.async_create_entry(title="", data=cleaned)
+
+        current = {**self._config_entry.data, **self._config_entry.options}
+
+        schema_dict: dict = {
+            vol.Required(
+                CONF_ROOM_NAME,
+                default=current.get(CONF_ROOM_NAME, ""),
+            ): str,
+            vol.Required(
+                CONF_MEDIA_ENTITY,
+                default=current.get(CONF_MEDIA_ENTITY),
+            ): EntitySelector(
+                EntitySelectorConfig(domain="media_player"),
+            ),
+            vol.Required(
+                CONF_LIGHT_ENTITY,
+                default=current.get(CONF_LIGHT_ENTITY),
+            ): EntitySelector(
+                EntitySelectorConfig(domain="light"),
+            ),
+            vol.Required(
+                CONF_LIGHT_DISPLAY_NAME,
+                default=current.get(CONF_LIGHT_DISPLAY_NAME, ""),
+            ): str,
+            vol.Required(
+                CONF_SCREENSAVER_TIMEOUT,
+                default=current.get(
+                    CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=5,
+                    max=3600,
+                    step=5,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="s",
+                ),
+            ),
+        }
+
+        weather_default = current.get(CONF_WEATHER_ENTITY)
+        weather_key = (
+            vol.Optional(CONF_WEATHER_ENTITY, default=weather_default)
+            if weather_default
+            else vol.Optional(CONF_WEATHER_ENTITY)
+        )
+        schema_dict[weather_key] = EntitySelector(
+            EntitySelectorConfig(domain="weather"),
+        )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(schema_dict),
         )
