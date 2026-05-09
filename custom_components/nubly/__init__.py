@@ -249,14 +249,21 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     """Publish device configuration to MQTT."""
     device_id = data[CONF_DEVICE_ID]
 
+    room_name = data[CONF_ROOM_NAME]
+    room_id = _slugify_room_id(room_name) or device_id
+
     light_entity = data.get(CONF_LIGHT_ENTITY)
     light_name = (
-        data.get(CONF_LIGHT_DISPLAY_NAME)
-        or data.get(CONF_ROOM_NAME)
-        or device_id
+        data.get(CONF_LIGHT_DISPLAY_NAME) or room_name or device_id
     )
     lights = (
-        [{"entity_id": light_entity, "name": light_name}]
+        [
+            {
+                "entity_id": light_entity,
+                "name": light_name,
+                "type": "dimmer",
+            }
+        ]
         if light_entity
         else []
     )
@@ -265,37 +272,30 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
         data.get(CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT)
     )
 
-    payload = {
-        "mode": "room_controller",
-        "device_id": device_id,
-        "room_name": data[CONF_ROOM_NAME],
+    room: dict = {
+        "id": room_id,
+        "name": room_name,
         "lights": lights,
-        "screens": {
-            "media_enabled": True,
-            "light_enabled": True,
-            "clock_enabled": True,
-        },
-        "screensaver_timeout": timeout,
-        "screensaver_timeout_seconds": timeout,
+        "scenes": [],
     }
-
-    if lights:
-        payload["light"] = {
-            "entity_id": light_entity,
-            "display_name": light_name,
-            "name": light_name,
-        }
 
     media_entity = data.get(CONF_MEDIA_ENTITY)
     if media_entity:
-        payload["media"] = {
+        room["media"] = {
             "entity_id": media_entity,
             "cover_art_url": _build_cover_art_url(hass, device_id),
         }
 
     weather_entity = data.get(CONF_WEATHER_ENTITY)
     if weather_entity:
-        payload["weather"] = {"entity_id": weather_entity}
+        room["weather"] = {"entity_id": weather_entity}
+
+    payload = {
+        "mode": "room_controller",
+        "device_id": device_id,
+        "room": room,
+        "screensaver_timeout": timeout,
+    }
 
     topic = f"nubly/devices/{device_id}/config"
     _LOGGER.debug("NUBLY HA: publishing config to topic = %s", topic)
@@ -356,6 +356,22 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
         return
     await async_check_provisioning_support(hass)
     hass.data[DOMAIN][flag_key] = True
+
+
+def _slugify_room_id(name: str | None) -> str:
+    """Lowercase, snake_case slug of a room display name."""
+    if not name:
+        return ""
+    out = []
+    prev_us = False
+    for ch in name.strip().lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_us = False
+        elif not prev_us:
+            out.append("_")
+            prev_us = True
+    return "".join(out).strip("_")
 
 
 def _build_cover_art_url(hass: HomeAssistant, device_id: str) -> str:
