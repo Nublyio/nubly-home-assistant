@@ -249,31 +249,53 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     """Publish device configuration to MQTT."""
     device_id = data[CONF_DEVICE_ID]
 
+    light_entity = data.get(CONF_LIGHT_ENTITY)
+    light_name = (
+        data.get(CONF_LIGHT_DISPLAY_NAME)
+        or data.get(CONF_ROOM_NAME)
+        or device_id
+    )
+    lights = (
+        [{"entity_id": light_entity, "name": light_name}]
+        if light_entity
+        else []
+    )
+
+    timeout = int(
+        data.get(CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT)
+    )
+
     payload = {
+        "mode": "room_controller",
         "device_id": device_id,
         "room_name": data[CONF_ROOM_NAME],
-        "media": {
-            "entity_id": data[CONF_MEDIA_ENTITY],
-        },
-        "light": {
-            "entity_id": data[CONF_LIGHT_ENTITY],
-            "display_name": data[CONF_LIGHT_DISPLAY_NAME],
-        },
+        "lights": lights,
         "screens": {
             "media_enabled": True,
             "light_enabled": True,
             "clock_enabled": True,
         },
-        "screensaver_timeout_seconds": int(
-            data.get(CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT)
-        ),
+        "screensaver_timeout": timeout,
+        "screensaver_timeout_seconds": timeout,
     }
+
+    if lights:
+        payload["light"] = {
+            "entity_id": light_entity,
+            "display_name": light_name,
+            "name": light_name,
+        }
+
+    media_entity = data.get(CONF_MEDIA_ENTITY)
+    if media_entity:
+        payload["media"] = {
+            "entity_id": media_entity,
+            "cover_art_url": _build_cover_art_url(hass, device_id),
+        }
 
     weather_entity = data.get(CONF_WEATHER_ENTITY)
     if weather_entity:
         payload["weather"] = {"entity_id": weather_entity}
-
-    payload["media"]["cover_art_url"] = _build_cover_art_url(hass, device_id)
 
     topic = f"nubly/devices/{device_id}/config"
     _LOGGER.debug("NUBLY HA: publishing config to topic = %s", topic)
