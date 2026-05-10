@@ -22,6 +22,7 @@ from .const import (
     CONF_ADDITIONAL_LIGHT_ENTITIES,
     CONF_DEVICE_ID,
     CONF_HOST,
+    CONF_HUMIDITY_ENTITY,
     CONF_LIGHT_DISPLAY_NAME,
     CONF_LIGHT_ENTITY,
     CONF_MEDIA_ENTITY,
@@ -30,6 +31,7 @@ from .const import (
     CONF_ROOM_NAME,
     CONF_SCREENSAVER_TIMEOUT,
     CONF_SW_VERSION,
+    CONF_TEMPERATURE_ENTITY,
     CONF_WEATHER_ENTITY,
     DEFAULT_SCREENSAVER_TIMEOUT,
     DOMAIN,
@@ -55,6 +57,14 @@ CONFIGURE_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_WEATHER_ENTITY): EntitySelector(
             EntitySelectorConfig(domain="weather"),
+        ),
+        vol.Optional(CONF_TEMPERATURE_ENTITY): EntitySelector(
+            EntitySelectorConfig(
+                domain="sensor", device_class="temperature"
+            ),
+        ),
+        vol.Optional(CONF_HUMIDITY_ENTITY): EntitySelector(
+            EntitySelectorConfig(domain="sensor", device_class="humidity"),
         ),
         vol.Required(
             CONF_SCREENSAVER_TIMEOUT,
@@ -284,6 +294,22 @@ class NublyOptionsFlow(OptionsFlow):
         schema_dict[weather_key] = EntitySelector(
             EntitySelectorConfig(domain="weather"),
         )
+
+        for conf_key, device_class in (
+            (CONF_TEMPERATURE_ENTITY, "temperature"),
+            (CONF_HUMIDITY_ENTITY, "humidity"),
+        ):
+            existing = current.get(conf_key)
+            key = (
+                vol.Optional(conf_key, default=existing)
+                if existing
+                else vol.Optional(conf_key)
+            )
+            schema_dict[key] = EntitySelector(
+                EntitySelectorConfig(
+                    domain="sensor", device_class=device_class
+                ),
+            )
 
         return self.async_show_form(
             step_id="init",

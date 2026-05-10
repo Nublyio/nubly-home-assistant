@@ -13,6 +13,7 @@ from homeassistant.helpers.network import NoURLAvailableError, get_url
 from .const import (
     CONF_ADDITIONAL_LIGHT_ENTITIES,
     CONF_DEVICE_ID,
+    CONF_HUMIDITY_ENTITY,
     CONF_LIGHT_DISPLAY_NAME,
     CONF_LIGHT_ENTITY,
     CONF_MEDIA_ENTITY,
@@ -20,6 +21,7 @@ from .const import (
     CONF_ROOM_NAME,
     CONF_SCREENSAVER_TIMEOUT,
     CONF_SW_VERSION,
+    CONF_TEMPERATURE_ENTITY,
     CONF_WEATHER_ENTITY,
     DEFAULT_SCREENSAVER_TIMEOUT,
     DOMAIN,
@@ -322,6 +324,16 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     weather_entity = data.get(CONF_WEATHER_ENTITY)
     if weather_entity:
         room["weather"] = {"entity_id": weather_entity}
+
+    temperature_entity = data.get(CONF_TEMPERATURE_ENTITY)
+    humidity_entity = data.get(CONF_HUMIDITY_ENTITY)
+    if temperature_entity or humidity_entity:
+        ambient: dict = {}
+        if temperature_entity:
+            ambient["temperature_entity"] = temperature_entity
+        if humidity_entity:
+            ambient["humidity_entity"] = humidity_entity
+        room["ambient"] = ambient
 
     payload = {
         "mode": "room_controller",
