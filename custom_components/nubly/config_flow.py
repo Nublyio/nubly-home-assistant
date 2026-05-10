@@ -25,6 +25,7 @@ from .const import (
     CONF_HUMIDITY_ENTITY,
     CONF_LIGHT_DISPLAY_NAME,
     CONF_LIGHT_ENTITY,
+    CONF_LIGHT_NAMES,
     CONF_MEDIA_ENTITY,
     CONF_MODEL,
     CONF_PORT,
@@ -82,6 +83,16 @@ CONFIGURE_SCHEMA = vol.Schema(
 )
 
 
+def _entity_friendly_name_or_id(hass: HomeAssistant, entity_id: str) -> str:
+    """Best-effort default name for a light: friendly_name then entity_id tail."""
+    state = hass.states.get(entity_id)
+    if state is not None:
+        name = state.attributes.get("friendly_name")
+        if isinstance(name, str) and name:
+            return name
+    return entity_id.split(".", 1)[-1].replace("_", " ").title()
+
+
 def _ha_mqtt_available(hass: HomeAssistant) -> bool:
     """Return True if HA's MQTT integration has an active config entry."""
     return bool(hass.config_entries.async_entries("mqtt"))
@@ -102,6 +113,7 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered: list[str] = []
         self._device_id: str | None = None
         self._discovery_fields: dict = {}
+        self._configure_input: dict | None = None
 
     async def async_step_zeroconf(
         self, discovery_info: ZeroconfServiceInfo
@@ -209,13 +221,10 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = error_key
 
             if not errors:
-                data = {**self._discovery_fields, **user_input}
-                title = user_input.get(CONF_ROOM_NAME) or self._device_id
-                _LOGGER.info(
-                    "NUBLY HA: config entry created for device_id = %s",
-                    self._device_id,
-                )
-                return self.async_create_entry(title=title, data=data)
+                self._configure_input = user_input
+                if user_input.get(CONF_ADDITIONAL_LIGHT_ENTITIES):
+                    return await self.async_step_light_names()
+                return self._finalize_entry({})
 
         return self.async_show_form(
             step_id="configure",
@@ -223,6 +232,46 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={"device_id": self._device_id or ""},
             errors=errors,
         )
+
+    async def async_step_light_names(self, user_input=None):
+        """Per-light optional friendly names for additional lights."""
+        assert self._configure_input is not None
+        extras: list[str] = list(
+            self._configure_input.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []
+        )
+
+        if user_input is not None:
+            names = {
+                eid: (user_input.get(eid) or "").strip()
+                for eid in extras
+                if (user_input.get(eid) or "").strip()
+            }
+            return self._finalize_entry({CONF_LIGHT_NAMES: names})
+
+        schema_dict: dict = {}
+        for eid in extras:
+            default = _entity_friendly_name_or_id(self.hass, eid)
+            schema_dict[vol.Optional(eid, default=default)] = str
+
+        return self.async_show_form(
+            step_id="light_names",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={"device_id": self._device_id or ""},
+        )
+
+    def _finalize_entry(self, extra_data: dict):
+        assert self._configure_input is not None
+        data = {
+            **self._discovery_fields,
+            **self._configure_input,
+            **extra_data,
+        }
+        title = self._configure_input.get(CONF_ROOM_NAME) or self._device_id
+        _LOGGER.info(
+            "NUBLY HA: config entry created for device_id = %s",
+            self._device_id,
+        )
+        return self.async_create_entry(title=title, data=data)
 
 
 class NublyOptionsFlow(OptionsFlow):
@@ -234,10 +283,16 @@ class NublyOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
+        self._init_input: dict | None = None
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             cleaned = {k: v for k, v in user_input.items() if v is not None}
+            extras = cleaned.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []
+            if extras:
+                self._init_input = cleaned
+                return await self.async_step_light_names()
+            cleaned[CONF_LIGHT_NAMES] = {}
             return self.async_create_entry(title="", data=cleaned)
 
         current = {**self._config_entry.data, **self._config_entry.options}
@@ -313,5 +368,38 @@ class NublyOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="init",
+            data_schema=vol.Schema(schema_dict),
+        )
+
+    async def async_step_light_names(self, user_input=None):
+        """Per-light optional names for additional lights (options flow)."""
+        assert self._init_input is not None
+        extras: list[str] = list(
+            self._init_input.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []
+        )
+        existing_names: dict = (
+            self._config_entry.options.get(CONF_LIGHT_NAMES)
+            or self._config_entry.data.get(CONF_LIGHT_NAMES)
+            or {}
+        )
+
+        if user_input is not None:
+            names = {
+                eid: (user_input.get(eid) or "").strip()
+                for eid in extras
+                if (user_input.get(eid) or "").strip()
+            }
+            data = {**self._init_input, CONF_LIGHT_NAMES: names}
+            return self.async_create_entry(title="", data=data)
+
+        schema_dict: dict = {}
+        for eid in extras:
+            default = existing_names.get(eid) or _entity_friendly_name_or_id(
+                self.hass, eid
+            )
+            schema_dict[vol.Optional(eid, default=default)] = str
+
+        return self.async_show_form(
+            step_id="light_names",
             data_schema=vol.Schema(schema_dict),
         )

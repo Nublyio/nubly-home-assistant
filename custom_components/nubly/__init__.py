@@ -16,6 +16,7 @@ from .const import (
     CONF_HUMIDITY_ENTITY,
     CONF_LIGHT_DISPLAY_NAME,
     CONF_LIGHT_ENTITY,
+    CONF_LIGHT_NAMES,
     CONF_MEDIA_ENTITY,
     CONF_MODEL,
     CONF_ROOM_NAME,
@@ -291,14 +292,18 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
         )
         seen.add(primary_light_entity)
 
+    light_names = data.get(CONF_LIGHT_NAMES) or {}
     for extra in data.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []:
         if not extra or extra in seen:
             continue
         seen.add(extra)
+        custom_name = (light_names.get(extra) or "").strip() if isinstance(
+            light_names, dict
+        ) else ""
         lights.append(
             {
                 "entity_id": extra,
-                "name": _entity_friendly_name(hass, extra),
+                "name": custom_name or _entity_friendly_name(hass, extra),
                 "type": "dimmer",
             }
         )

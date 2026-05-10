@@ -23,6 +23,10 @@
       },
       "manual": {
         "title": "Enter Nubly device ID"
+      },
+      "light_names": {
+        "title": "Light names",
+        "description": "Set a display name for each additional light. Leave a field empty to use the entity's friendly name."
       }
     }
   },
@@ -31,6 +35,10 @@
       "init": {
         "title": "Nubly settings",
         "description": "Update room and entity settings. Changes are sent to the device over MQTT."
+      },
+      "light_names": {
+        "title": "Light names",
+        "description": "Set a display name for each additional light."
       }
     }
   }
