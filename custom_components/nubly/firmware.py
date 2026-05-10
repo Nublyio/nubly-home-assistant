@@ -211,8 +211,24 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
             )
         return {}
 
+    def versions_for(self, board: str | None) -> list[str]:
+        """Return every manifest version string available for the given board."""
+        data = self.data or {}
+        manifest = data.get("manifest") or {}
+        if not isinstance(manifest, dict) or not board:
+            return []
+        return [
+            e["version"]
+            for e in _board_entries(manifest, board)
+            if isinstance(e.get("version"), str) and e["version"]
+        ]
+
     def resolve(self, board: str | None) -> FirmwareInfo | None:
-        """Return firmware metadata for the given board, or None."""
+        """Return firmware metadata for the given board, or None.
+
+        When the manifest contains multiple entries for the same board, the
+        entry with the highest semantic version wins.
+        """
         _LOGGER.debug("NUBLY HA: resolve() requested for board=%s", board)
         data = self.data or {}
         manifest = data.get("manifest") or {}
@@ -254,25 +270,75 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
         return info
 
 
-def _find_board_entry(manifest: dict, board: str | None) -> dict | None:
-    """Locate the entry for `board` in either canonical or legacy schemas."""
+def _board_entries(manifest: dict, board: str | None) -> list[dict]:
+    """Return every firmware entry for `board` across all supported schemas.
+
+    Handles:
+      - canonical single:   manifest["boards"][board] = {version, firmware_url, sha256}
+      - canonical multi:    manifest["boards"][board] = [ {version, ...}, ... ]
+      - canonical multi v2: manifest["boards"][board] = {"versions": [ ... ]}
+      - legacy:             manifest["firmwares"] = [ {board, version, ...}, ... ]
+    """
     if not board:
-        return None
+        return []
+    entries: list[dict] = []
 
     boards = manifest.get("boards")
     if isinstance(boards, dict):
-        entry = boards.get(board)
-        if isinstance(entry, dict):
-            return entry
+        node = boards.get(board)
+        if isinstance(node, list):
+            entries.extend(e for e in node if isinstance(e, dict))
+        elif isinstance(node, dict):
+            versions = node.get("versions")
+            if isinstance(versions, list):
+                entries.extend(e for e in versions if isinstance(e, dict))
+            else:
+                entries.append(node)
 
-    # Legacy: { "firmwares": [ { "board": "...", "version": "...", ... }, ... ] }
     firmwares = manifest.get("firmwares")
     if isinstance(firmwares, list):
         for entry in firmwares:
             if isinstance(entry, dict) and entry.get("board") == board:
-                return entry
+                entries.append(entry)
 
-    return None
+    return entries
+
+
+def _find_board_entry(manifest: dict, board: str | None) -> dict | None:
+    """Return the entry with the highest semantic version for `board`."""
+    entries = _board_entries(manifest, board)
+    return _pick_newest(entries)
+
+
+def _pick_newest(entries: list[dict]) -> dict | None:
+    """Pick the entry with the highest semantic version. Stable for ties."""
+    candidates = [
+        e for e in entries
+        if isinstance(e.get("version"), str) and e["version"]
+    ]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    try:
+        from awesomeversion import AwesomeVersion
+
+        return max(candidates, key=lambda e: AwesomeVersion(e["version"]))
+    except Exception:
+        # Fallback if AwesomeVersion is unavailable or a version is unparseable.
+        return max(candidates, key=lambda e: _version_tuple(e["version"]))
+
+
+def _version_tuple(version: str) -> tuple:
+    """Best-effort numeric tuple for semver-ish strings."""
+    core = version.split("-", 1)[0].split("+", 1)[0]
+    out: list[int] = []
+    for part in core.split("."):
+        try:
+            out.append(int(part))
+        except ValueError:
+            out.append(0)
+    return tuple(out)
 
 
 async def _fetch_json(session, url: str, timeout) -> dict | None:

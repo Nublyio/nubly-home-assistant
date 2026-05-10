@@ -56,11 +56,11 @@ async def async_setup_entry(
         provider = NublyFirmwareProvider(hass)
         hass.data[DOMAIN]["_firmware_provider"] = provider
         await provider.async_config_entry_first_refresh()
-    elif not provider.last_update_success:
-        # Previous fetch failed (e.g. manifest hadn't been published yet) —
-        # retry now so latest_version self-heals on reload.
+    else:
+        # Force a refresh on every entry reload so users can pull the latest
+        # manifest without waiting for the 6-hour periodic refresh.
         _LOGGER.debug(
-            "NUBLY HA: firmware provider in failed state — requesting refresh"
+            "NUBLY HA: firmware provider exists — requesting refresh on reload"
         )
         await provider.async_refresh()
 
@@ -122,8 +122,41 @@ class NublyFirmwareUpdate(
 
     @property
     def latest_version(self) -> str | None:
+        board = self._device_board()
+        installed = self.installed_version
+        all_versions = self.coordinator.versions_for(board) if board else []
         info = self._resolve_firmware()
-        return info.version if info else None
+        selected = info.version if info else None
+
+        if board and not all_versions:
+            _LOGGER.warning(
+                "NUBLY HA: no firmware entries for board=%s (device=%s "
+                "name=%r). Manifest boards: %s",
+                board,
+                self._device_id,
+                self._device_name(),
+                sorted(((self.coordinator.data or {}).get("manifest") or {})
+                       .get("boards", {}).keys())
+                if isinstance(
+                    ((self.coordinator.data or {}).get("manifest") or {})
+                    .get("boards"),
+                    dict,
+                )
+                else None,
+            )
+        else:
+            _LOGGER.debug(
+                "NUBLY HA: latest_version device=%s name=%r board=%s "
+                "installed=%s selected=%s versions_for_board=%s",
+                self._device_id,
+                self._device_name(),
+                board,
+                installed,
+                selected,
+                all_versions,
+            )
+
+        return selected
 
     @property
     def release_url(self) -> str | None:
@@ -269,6 +302,11 @@ class NublyFirmwareUpdate(
                 "NUBLY HA: failed to publish OTA install command for %s",
                 self._device_id,
             )
+
+    def _device_name(self) -> str | None:
+        # Prefer the room/title shown to the user. Falls back to device_id.
+        title = self._entry.title if self._entry else None
+        return title or self._device_id
 
     def _device_board(self) -> str | None:
         raw = get_attr(
