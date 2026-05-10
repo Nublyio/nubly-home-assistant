@@ -37,6 +37,15 @@ from homeassistant.helpers.update_coordinator import (
 _LOGGER = logging.getLogger(__name__)
 
 GITHUB_REPO = "Nublyio/nubly-home-assistant"
+GITHUB_BRANCH = "main"
+# Canonical firmware manifest: committed by the firmware build repo into this
+# integration repo at firmware/manifest.json. Devices fetch the .bin files at
+# firmware/bin/<artifact>.bin via raw URLs referenced from the manifest.
+MANIFEST_RAW_URL = (
+    f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}"
+    "/firmware/manifest.json"
+)
+# Fallback: older releases attached the manifest.json as a release asset.
 GITHUB_RELEASES_URL = (
     f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 )
@@ -92,41 +101,76 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
         session = async_get_clientsession(self.hass)
         timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
+        manifest = await self._fetch_raw_manifest(session, timeout)
+        release_url: str | None = None
+        release_notes: str | None = None
+
+        # Best-effort enrichment: pick up release_url / notes from the latest
+        # GitHub release. Failure here must not block OTA — the manifest is
+        # the source of truth.
         try:
             async with session.get(
                 GITHUB_RELEASES_URL, timeout=timeout
             ) as resp:
-                if resp.status != 200:
-                    raise UpdateFailed(
-                        f"GitHub releases returned HTTP {resp.status}"
-                    )
-                release = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise UpdateFailed(f"GitHub fetch failed: {err}") from err
+                if resp.status == 200:
+                    release = await resp.json()
+                    if isinstance(release, dict):
+                        release_url = release.get("html_url")
+                        release_notes = release.get("body")
+                        # Legacy fallback: if the raw fetch failed AND a
+                        # release-asset manifest exists, parse it.
+                        if not manifest:
+                            asset_url = _find_manifest_asset_url(release)
+                            if asset_url:
+                                manifest = (
+                                    await _fetch_json(
+                                        session, asset_url, timeout
+                                    )
+                                    or {}
+                                )
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            _LOGGER.debug(
+                "NUBLY HA: GitHub release lookup failed (non-fatal)"
+            )
 
-        if not isinstance(release, dict):
-            raise UpdateFailed("Unexpected GitHub release payload")
-
-        manifest_url = _find_manifest_asset_url(release)
-        manifest: dict = {}
-        if manifest_url:
-            try:
-                async with session.get(
-                    manifest_url, timeout=timeout
-                ) as resp:
-                    if resp.status == 200:
-                        parsed = await resp.json(content_type=None)
-                        if isinstance(parsed, dict):
-                            manifest = parsed
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-                _LOGGER.debug("NUBLY HA: manifest.json fetch failed")
+        if not manifest:
+            raise UpdateFailed(
+                "Firmware manifest not found at firmware/manifest.json or "
+                "in the latest release"
+            )
 
         return {
             "manifest": manifest,
-            "release_url": release.get("html_url"),
-            "release_notes": release.get("body"),
-            "tag": release.get("tag_name"),
+            "release_url": release_url,
+            "release_notes": release_notes,
         }
+
+    async def _fetch_raw_manifest(
+        self, session, timeout
+    ) -> dict:
+        """Fetch the canonical firmware/manifest.json from raw.githubusercontent."""
+        try:
+            async with session.get(
+                MANIFEST_RAW_URL, timeout=timeout
+            ) as resp:
+                if resp.status == 200:
+                    parsed = await resp.json(content_type=None)
+                    if isinstance(parsed, dict):
+                        _LOGGER.debug(
+                            "NUBLY HA: manifest fetched from %s",
+                            MANIFEST_RAW_URL,
+                        )
+                        return parsed
+                else:
+                    _LOGGER.debug(
+                        "NUBLY HA: manifest raw fetch HTTP %s",
+                        resp.status,
+                    )
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            _LOGGER.debug(
+                "NUBLY HA: manifest raw fetch failed (will try release fallback)"
+            )
+        return {}
 
     def resolve(self, board: str | None) -> FirmwareInfo | None:
         """Return firmware metadata for the given board, or None."""
@@ -135,24 +179,20 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
         if not isinstance(manifest, dict):
             return None
 
+        entry = _find_board_entry(manifest, board)
         info: FirmwareInfo | None = None
-        boards = manifest.get("boards")
 
-        if isinstance(boards, dict) and board and board in boards:
-            entry = boards[board]
-            if isinstance(entry, dict):
-                info = FirmwareInfo(
-                    board=board,
-                    version=entry.get("version"),
-                    firmware_url=entry.get("firmware_url") or entry.get("url"),
-                    sha256=entry.get("sha256"),
-                    release_url=data.get("release_url"),
-                    release_notes=data.get("release_notes"),
-                )
-        elif manifest.get("version") and not boards:
-            # Legacy flat manifest. Treat as board-agnostic and let the
-            # caller decide whether to install (compat check still applies
-            # at the device side).
+        if entry is not None:
+            info = FirmwareInfo(
+                board=board or entry.get("board") or "",
+                version=entry.get("version"),
+                firmware_url=entry.get("firmware_url") or entry.get("url"),
+                sha256=entry.get("sha256"),
+                release_url=data.get("release_url"),
+                release_notes=data.get("release_notes"),
+            )
+        elif manifest.get("version") and not manifest.get("boards") and not manifest.get("firmwares"):
+            # Legacy flat manifest, single firmware. Board-agnostic.
             info = FirmwareInfo(
                 board=board or "",
                 version=manifest.get("version"),
@@ -169,6 +209,38 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
             info,
         )
         return info
+
+
+def _find_board_entry(manifest: dict, board: str | None) -> dict | None:
+    """Locate the entry for `board` in either canonical or legacy schemas."""
+    if not board:
+        return None
+
+    boards = manifest.get("boards")
+    if isinstance(boards, dict):
+        entry = boards.get(board)
+        if isinstance(entry, dict):
+            return entry
+
+    # Legacy: { "firmwares": [ { "board": "...", "version": "...", ... }, ... ] }
+    firmwares = manifest.get("firmwares")
+    if isinstance(firmwares, list):
+        for entry in firmwares:
+            if isinstance(entry, dict) and entry.get("board") == board:
+                return entry
+
+    return None
+
+
+async def _fetch_json(session, url: str, timeout) -> dict | None:
+    try:
+        async with session.get(url, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            parsed = await resp.json(content_type=None)
+            return parsed if isinstance(parsed, dict) else None
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return None
 
 
 def _find_manifest_asset_url(release: dict) -> str | None:
