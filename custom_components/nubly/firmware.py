@@ -21,6 +21,7 @@ Legacy fallback shape (single board, no compat data):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -112,6 +113,11 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
             async with session.get(
                 GITHUB_RELEASES_URL, timeout=timeout
             ) as resp:
+                _LOGGER.debug(
+                    "NUBLY HA: GitHub releases fetch %s -> HTTP %s",
+                    GITHUB_RELEASES_URL,
+                    resp.status,
+                )
                 if resp.status == 200:
                     release = await resp.json()
                     if isinstance(release, dict):
@@ -122,22 +128,35 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
                         if not manifest:
                             asset_url = _find_manifest_asset_url(release)
                             if asset_url:
+                                _LOGGER.debug(
+                                    "NUBLY HA: falling back to release-asset "
+                                    "manifest at %s",
+                                    asset_url,
+                                )
                                 manifest = (
                                     await _fetch_json(
                                         session, asset_url, timeout
                                     )
                                     or {}
                                 )
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             _LOGGER.debug(
-                "NUBLY HA: GitHub release lookup failed (non-fatal)"
+                "NUBLY HA: GitHub release lookup failed (non-fatal): %s", err
             )
 
         if not manifest:
             raise UpdateFailed(
-                "Firmware manifest not found at firmware/manifest.json or "
-                "in the latest release"
+                f"Firmware manifest not found at {MANIFEST_RAW_URL} "
+                "or in the latest GitHub release"
             )
+
+        _LOGGER.debug(
+            "NUBLY HA: manifest top-level keys=%s, boards=%s",
+            sorted(manifest.keys()),
+            sorted((manifest.get("boards") or {}).keys())
+            if isinstance(manifest.get("boards"), dict)
+            else None,
+        )
 
         return {
             "manifest": manifest,
@@ -145,38 +164,62 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
             "release_notes": release_notes,
         }
 
-    async def _fetch_raw_manifest(
-        self, session, timeout
-    ) -> dict:
+    async def _fetch_raw_manifest(self, session, timeout) -> dict:
         """Fetch the canonical firmware/manifest.json from raw.githubusercontent."""
+        _LOGGER.debug(
+            "NUBLY HA: fetching manifest from %s", MANIFEST_RAW_URL
+        )
         try:
             async with session.get(
                 MANIFEST_RAW_URL, timeout=timeout
             ) as resp:
-                if resp.status == 200:
-                    parsed = await resp.json(content_type=None)
-                    if isinstance(parsed, dict):
-                        _LOGGER.debug(
-                            "NUBLY HA: manifest fetched from %s",
-                            MANIFEST_RAW_URL,
-                        )
-                        return parsed
-                else:
+                status = resp.status
+                if status == 200:
+                    text = await resp.text()
                     _LOGGER.debug(
-                        "NUBLY HA: manifest raw fetch HTTP %s",
-                        resp.status,
+                        "NUBLY HA: manifest raw fetch HTTP 200, %d bytes",
+                        len(text),
                     )
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-            _LOGGER.debug(
-                "NUBLY HA: manifest raw fetch failed (will try release fallback)"
+                    try:
+                        parsed = json.loads(text)
+                    except (ValueError, TypeError) as err:
+                        _LOGGER.warning(
+                            "NUBLY HA: manifest JSON parse failed: %s", err
+                        )
+                        return {}
+                    if isinstance(parsed, dict):
+                        return parsed
+                    _LOGGER.warning(
+                        "NUBLY HA: manifest is not a JSON object (type=%s)",
+                        type(parsed).__name__,
+                    )
+                    return {}
+                _LOGGER.warning(
+                    "NUBLY HA: manifest raw fetch HTTP %s from %s",
+                    status,
+                    MANIFEST_RAW_URL,
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            _LOGGER.warning(
+                "NUBLY HA: manifest raw fetch failed: %s (will try release fallback)",
+                err,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "NUBLY HA: unexpected error fetching manifest from %s",
+                MANIFEST_RAW_URL,
             )
         return {}
 
     def resolve(self, board: str | None) -> FirmwareInfo | None:
         """Return firmware metadata for the given board, or None."""
+        _LOGGER.debug("NUBLY HA: resolve() requested for board=%s", board)
         data = self.data or {}
         manifest = data.get("manifest") or {}
         if not isinstance(manifest, dict):
+            _LOGGER.debug(
+                "NUBLY HA: resolve() — coordinator has no manifest yet"
+            )
             return None
 
         entry = _find_board_entry(manifest, board)

@@ -56,6 +56,13 @@ async def async_setup_entry(
         provider = NublyFirmwareProvider(hass)
         hass.data[DOMAIN]["_firmware_provider"] = provider
         await provider.async_config_entry_first_refresh()
+    elif not provider.last_update_success:
+        # Previous fetch failed (e.g. manifest hadn't been published yet) —
+        # retry now so latest_version self-heals on reload.
+        _LOGGER.debug(
+            "NUBLY HA: firmware provider in failed state — requesting refresh"
+        )
+        await provider.async_refresh()
 
     device_data: NublyDeviceData = hass.data[DOMAIN][entry.entry_id][
         "device_data"
