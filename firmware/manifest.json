@@ -1,0 +1,9 @@
+{
+  "boards": {
+    "lcd_5_1024x600": {
+      "firmware_url": "https://raw.githubusercontent.com/Nublyio/nubly-home-assistant/main/firmware/bin/nubly-lcd_5_1024x600-0.3.0.bin",
+      "sha256": "8302bc60da02614ff6fb15e62241921b995a0a800036b42b9484638ca1d547bf",
+      "version": "0.3.0"
+    }
+  }
+}
