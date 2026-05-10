@@ -26,6 +26,7 @@ class NublyDeviceData:
         self.hass = hass
         self.device_id = device_id
         self.attributes: dict = {}
+        self.ota_state: dict = {}
         self.available: bool = False
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
@@ -33,6 +34,7 @@ class NublyDeviceData:
     async def async_start(self) -> None:
         attrs_topic = f"nubly/devices/{self.device_id}/attributes"
         avail_topic = f"nubly/devices/{self.device_id}/availability"
+        ota_topic = f"nubly/devices/{self.device_id}/ota/state"
 
         self._unsubs.append(
             await mqtt.async_subscribe(
@@ -42,6 +44,11 @@ class NublyDeviceData:
         self._unsubs.append(
             await mqtt.async_subscribe(
                 self.hass, avail_topic, self._on_availability
+            )
+        )
+        self._unsubs.append(
+            await mqtt.async_subscribe(
+                self.hass, ota_topic, self._on_ota_state
             )
         )
 
@@ -92,6 +99,29 @@ class NublyDeviceData:
         self._notify()
 
     @callback
+    def _on_ota_state(self, msg) -> None:
+        payload = msg.payload
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8", errors="replace")
+        if not payload:
+            self.ota_state = {}
+            self._notify()
+            return
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        self.ota_state = data
+        _LOGGER.debug(
+            "NUBLY HA: device OTA progress update for %s -> %s",
+            self.device_id,
+            data,
+        )
+        self._notify()
+
+    @callback
     def _on_availability(self, msg) -> None:
         payload = msg.payload
         if isinstance(payload, bytes):
@@ -103,6 +133,51 @@ class NublyDeviceData:
         if new_available != self.available:
             self.available = new_available
             self._notify()
+
+
+def _ota_field(data: "NublyDeviceData", *keys: str):
+    """Read an OTA field from ota_state first, then attributes."""
+    for source in (data.ota_state, data.attributes):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source:
+                value = source[key]
+                if value not in (None, ""):
+                    return value
+    return None
+
+
+def ota_in_progress(data: "NublyDeviceData") -> bool:
+    value = _ota_field(data, "ota_in_progress", "in_progress", "ota_active")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return False
+
+
+def ota_progress_percent(data: "NublyDeviceData") -> int | None:
+    value = _ota_field(data, "ota_progress", "progress", "ota_percent")
+    if value is None:
+        return None
+    try:
+        pct = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, pct))
+
+
+def ota_last_result(data: "NublyDeviceData") -> str | None:
+    value = _ota_field(data, "ota_last_result", "last_result", "result")
+    return value if isinstance(value, str) else None
+
+
+def ota_last_error(data: "NublyDeviceData") -> str | None:
+    value = _ota_field(data, "ota_last_error", "last_error", "error")
+    return value if isinstance(value, str) else None
 
 
 def get_attr(attrs: dict, *keys: str):

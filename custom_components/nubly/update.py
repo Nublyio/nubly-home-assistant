@@ -1,48 +1,46 @@
-"""Nubly firmware UpdateEntity backed by GitHub Releases.
+"""Nubly firmware UpdateEntity.
 
-A `manifest.json` asset attached to the latest GitHub release is the source
-of truth for the firmware update. It must contain at least:
+One Update entity per Nubly device. Reads:
+  - installed_version from device telemetry (attributes topic)
+  - latest_version   from the firmware provider (NublyFirmwareProvider)
+  - ota progress     from device_data (ota/state topic + attributes fallback)
 
-    {
-      "version": "1.2.3",
-      "url":     "https://example.com/firmware.bin",
-      "sha256":  "<hex digest>"
-    }
+OTA install is triggered by publishing to:
+  nubly/devices/<device_id>/ota/install   {"version": "...", "url": "..."}
 
-If the asset is missing or incomplete, no update is exposed (the entity
-simply shows no available version).
+Compatibility: refuses to install if the resolved firmware's board doesn't
+match the device's reported board.
 """
 
-import asyncio
+from __future__ import annotations
+
 import json
 import logging
-from datetime import timedelta
 
-import aiohttp
-
-from homeassistant.components import mqtt
 from homeassistant.components.update import UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import (
-    CoordinatorEntity,
-    DataUpdateCoordinator,
-    UpdateFailed,
-)
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_DEVICE_ID, CONF_SW_VERSION, DOMAIN
+from .const import CONF_DEVICE_ID, CONF_MODEL, CONF_SW_VERSION, DOMAIN
+from .device_data import (
+    NublyDeviceData,
+    get_attr,
+    ota_in_progress,
+    ota_last_error,
+    ota_last_result,
+    ota_progress_percent,
+)
+from .firmware import (
+    FirmwareInfo,
+    NublyFirmwareProvider,
+    SUPPORTED_BOARDS,
+    normalize_board,
+)
 
 _LOGGER = logging.getLogger(__name__)
-
-GITHUB_REPO = "Nublyio/nubly-home-assistant"
-GITHUB_RELEASES_URL = (
-    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-)
-SCAN_INTERVAL = timedelta(hours=6)
-HTTP_TIMEOUT_SECONDS = 15
 
 
 async def async_setup_entry(
@@ -50,82 +48,32 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Nubly firmware update entity for this config entry."""
-    coordinator = hass.data[DOMAIN].get("_release_coordinator")
-    if coordinator is None:
-        coordinator = NublyReleaseCoordinator(hass)
-        hass.data[DOMAIN]["_release_coordinator"] = coordinator
-        await coordinator.async_config_entry_first_refresh()
+    """Set up the Nubly firmware Update entity for this config entry."""
+    provider: NublyFirmwareProvider | None = hass.data[DOMAIN].get(
+        "_firmware_provider"
+    )
+    if provider is None:
+        provider = NublyFirmwareProvider(hass)
+        hass.data[DOMAIN]["_firmware_provider"] = provider
+        await provider.async_config_entry_first_refresh()
 
-    async_add_entities([NublyFirmwareUpdate(hass, entry, coordinator)])
-
-
-class NublyReleaseCoordinator(DataUpdateCoordinator):
-    """Periodically fetches the latest firmware manifest from GitHub."""
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        super().__init__(
-            hass,
-            _LOGGER,
-            name="nubly_firmware_release",
-            update_interval=SCAN_INTERVAL,
-        )
-
-    async def _async_update_data(self) -> dict:
-        session = async_get_clientsession(self.hass)
-        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
-
-        try:
-            async with session.get(GITHUB_RELEASES_URL, timeout=timeout) as resp:
-                if resp.status != 200:
-                    raise UpdateFailed(
-                        f"GitHub releases returned HTTP {resp.status}"
-                    )
-                release = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise UpdateFailed(f"GitHub fetch failed: {err}") from err
-
-        if not isinstance(release, dict):
-            raise UpdateFailed("Unexpected GitHub release payload")
-
-        manifest_url = _find_manifest_asset_url(release)
-        manifest = {}
-        if manifest_url:
-            try:
-                async with session.get(
-                    manifest_url, timeout=timeout
-                ) as resp:
-                    if resp.status == 200:
-                        manifest = await resp.json(content_type=None)
-                        if not isinstance(manifest, dict):
-                            manifest = {}
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-                _LOGGER.debug(
-                    "NUBLY HA: failed to fetch firmware manifest.json"
-                )
-
-        return {
-            "version": manifest.get("version"),
-            "url": manifest.get("url"),
-            "sha256": manifest.get("sha256"),
-            "release_url": release.get("html_url"),
-            "release_notes": release.get("body"),
-            "tag": release.get("tag_name"),
-        }
+    device_data: NublyDeviceData = hass.data[DOMAIN][entry.entry_id][
+        "device_data"
+    ]
+    async_add_entities(
+        [NublyFirmwareUpdate(hass, entry, provider, device_data)]
+    )
 
 
-def _find_manifest_asset_url(release: dict) -> str | None:
-    for asset in release.get("assets") or []:
-        if isinstance(asset, dict) and asset.get("name") == "manifest.json":
-            return asset.get("browser_download_url")
-    return None
-
-
-class NublyFirmwareUpdate(CoordinatorEntity[NublyReleaseCoordinator], UpdateEntity):
+class NublyFirmwareUpdate(
+    CoordinatorEntity[NublyFirmwareProvider], UpdateEntity
+):
     """One firmware UpdateEntity per Nubly device."""
 
     _attr_supported_features = (
-        UpdateEntityFeature.INSTALL | UpdateEntityFeature.RELEASE_NOTES
+        UpdateEntityFeature.INSTALL
+        | UpdateEntityFeature.PROGRESS
+        | UpdateEntityFeature.RELEASE_NOTES
     )
     _attr_has_entity_name = True
     _attr_name = "Firmware"
@@ -134,106 +82,164 @@ class NublyFirmwareUpdate(CoordinatorEntity[NublyReleaseCoordinator], UpdateEnti
         self,
         hass: HomeAssistant,
         entry: ConfigEntry,
-        coordinator: NublyReleaseCoordinator,
+        provider: NublyFirmwareProvider,
+        device_data: NublyDeviceData,
     ) -> None:
-        super().__init__(coordinator)
+        super().__init__(provider)
         self.hass = hass
         self._entry = entry
+        self._device_data = device_data
         self._device_id = entry.data[CONF_DEVICE_ID]
         self._attr_unique_id = f"{self._device_id}_firmware"
         self._installed_version: str | None = entry.data.get(CONF_SW_VERSION)
-        self._unsub_attrs = None
 
     @property
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(identifiers={(DOMAIN, self._device_id)})
 
     @property
+    def available(self) -> bool:
+        return bool(self._device_data.available) and self.coordinator.last_update_success
+
+    @property
     def installed_version(self) -> str | None:
+        device_version = get_attr(
+            self._device_data.attributes,
+            "firmware_version",
+            "sw_version",
+            "version",
+        )
+        if isinstance(device_version, str) and device_version:
+            return device_version
         return self._installed_version
 
     @property
     def latest_version(self) -> str | None:
-        data = self.coordinator.data or {}
-        return data.get("version")
+        info = self._resolve_firmware()
+        return info.version if info else None
 
     @property
     def release_url(self) -> str | None:
-        data = self.coordinator.data or {}
-        return data.get("release_url")
+        info = self._resolve_firmware()
+        return info.release_url if info else None
+
+    @property
+    def in_progress(self) -> bool | int:
+        if not ota_in_progress(self._device_data):
+            return False
+        pct = ota_progress_percent(self._device_data)
+        return pct if pct is not None else True
+
+    @property
+    def update_percentage(self) -> int | None:
+        if not ota_in_progress(self._device_data):
+            return None
+        return ota_progress_percent(self._device_data)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        attrs: dict = {}
+        board = self._device_board()
+        if board:
+            attrs["board"] = board
+        last_result = ota_last_result(self._device_data)
+        if last_result:
+            attrs["ota_last_result"] = last_result
+        last_error = ota_last_error(self._device_data)
+        if last_error:
+            attrs["ota_last_error"] = last_error
+        return attrs
 
     async def async_release_notes(self) -> str | None:
-        data = self.coordinator.data or {}
-        return data.get("release_notes")
+        info = self._resolve_firmware()
+        return info.release_notes if info else None
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        topic = f"nubly/devices/{self._device_id}/attributes"
+        self.async_on_remove(
+            self._device_data.add_listener(self._handle_device_update)
+        )
 
-        @callback
-        def on_attrs(msg) -> None:
-            payload = msg.payload
-            if isinstance(payload, bytes):
-                payload = payload.decode("utf-8", errors="replace")
-            try:
-                data = json.loads(payload)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                return
-            if not isinstance(data, dict):
-                return
-            sw = (
-                data.get("firmware_version")
-                or data.get("sw_version")
-                or data.get("version")
-            )
-            if isinstance(sw, str) and sw and sw != self._installed_version:
-                self._installed_version = sw
-                self.async_write_ha_state()
+    def _handle_device_update(self) -> None:
+        new_version = get_attr(
+            self._device_data.attributes,
+            "firmware_version",
+            "sw_version",
+            "version",
+        )
+        if (
+            isinstance(new_version, str)
+            and new_version
+            and new_version != self._installed_version
+        ):
+            self._installed_version = new_version
 
-        try:
-            self._unsub_attrs = await mqtt.async_subscribe(
-                self.hass, topic, on_attrs
+        last_result = ota_last_result(self._device_data)
+        last_error = ota_last_error(self._device_data)
+        if last_result == "success":
+            _LOGGER.debug(
+                "NUBLY HA: OTA completed for %s (version=%s)",
+                self._device_id,
+                self.installed_version,
             )
-        except Exception:
-            _LOGGER.exception(
-                "NUBLY HA: failed to subscribe to %s for sw_version updates",
-                topic,
+        elif last_result and last_result != "success":
+            _LOGGER.debug(
+                "NUBLY HA: OTA failed for %s (result=%s, error=%s)",
+                self._device_id,
+                last_result,
+                last_error,
             )
 
-    async def async_will_remove_from_hass(self) -> None:
-        if self._unsub_attrs is not None:
-            self._unsub_attrs()
-            self._unsub_attrs = None
+        self.async_write_ha_state()
 
     async def async_install(
         self, version: str | None, backup: bool, **kwargs
     ) -> None:
-        """Tell the ESP32 to install the latest firmware over MQTT."""
-        data = self.coordinator.data or {}
-        target_version = version or data.get("version")
-        url = data.get("url")
-        sha256 = data.get("sha256")
+        """Publish the OTA install command for this device over MQTT."""
+        _LOGGER.debug(
+            "NUBLY HA: OTA install requested for %s (version=%s)",
+            self._device_id,
+            version,
+        )
 
-        if not target_version or not url or not sha256:
+        if not self._device_data.available:
             _LOGGER.error(
-                "NUBLY HA: firmware manifest incomplete (version=%s, url=%s, sha256=%s) — not sending update",
-                bool(target_version),
-                bool(url),
-                bool(sha256),
+                "NUBLY HA: device %s is offline — refusing OTA install",
+                self._device_id,
             )
             return
 
-        topic = f"nubly/devices/{self._device_id}/command/update"
-        payload = {
-            "version": target_version,
-            "url": url,
-            "sha256": sha256,
-        }
-        _LOGGER.info(
-            "NUBLY HA: sending firmware update command to %s (version=%s)",
-            topic,
-            target_version,
-        )
+        info = self._resolve_firmware()
+        if info is None or not info.version or not info.firmware_url:
+            _LOGGER.error(
+                "NUBLY HA: firmware metadata unavailable for board=%s — "
+                "refusing OTA install",
+                self._device_board(),
+            )
+            return
+
+        device_board = self._device_board()
+        if (
+            info.board
+            and device_board
+            and info.board in SUPPORTED_BOARDS
+            and info.board != device_board
+        ):
+            _LOGGER.error(
+                "NUBLY HA: firmware board=%s incompatible with device board=%s — "
+                "refusing OTA install for %s",
+                info.board,
+                device_board,
+                self._device_id,
+            )
+            return
+
+        target_version = version or info.version
+        topic = f"nubly/devices/{self._device_id}/ota/install"
+        payload = {"version": target_version, "url": info.firmware_url}
+        if info.sha256:
+            payload["sha256"] = info.sha256
+
         try:
             await self.hass.services.async_call(
                 "mqtt",
@@ -246,7 +252,26 @@ class NublyFirmwareUpdate(CoordinatorEntity[NublyReleaseCoordinator], UpdateEnti
                 },
                 blocking=True,
             )
+            _LOGGER.debug(
+                "NUBLY HA: MQTT OTA command published to %s (version=%s)",
+                topic,
+                target_version,
+            )
         except Exception:
             _LOGGER.exception(
-                "NUBLY HA: failed to publish firmware update command"
+                "NUBLY HA: failed to publish OTA install command for %s",
+                self._device_id,
             )
+
+    def _device_board(self) -> str | None:
+        raw = get_attr(
+            self._device_data.attributes, "board", "device_type", "model"
+        )
+        if isinstance(raw, str) and raw:
+            return normalize_board(raw)
+        # Fall back to whatever was captured at config-entry creation.
+        configured = self._entry.data.get(CONF_MODEL)
+        return normalize_board(configured) if isinstance(configured, str) else None
+
+    def _resolve_firmware(self) -> FirmwareInfo | None:
+        return self.coordinator.resolve(self._device_board())
