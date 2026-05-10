@@ -25,6 +25,7 @@ from .const import (
     LEGACY_DEVICE_ID,
 )
 from .commands import async_subscribe_commands
+from .device_data import NublyDeviceData
 from .discovery import async_discover_devices
 from .provisioning import async_check_provisioning_support
 from .view import NublyCoverArtView
@@ -34,7 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 _PUBLISH_MAX_ATTEMPTS = 5
 _PUBLISH_RETRY_DELAY_SECONDS = 2
 
-PLATFORMS = ["update"]
+PLATFORMS = ["update", "sensor", "binary_sensor"]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -120,7 +121,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.options:
         data.update(entry.options)
 
-    hass.data[DOMAIN][entry.entry_id] = data
+    device_data = NublyDeviceData(hass, data[CONF_DEVICE_ID])
+    try:
+        await device_data.async_start()
+    except Exception:
+        _LOGGER.exception(
+            "NUBLY HA: failed to subscribe to attributes/availability for %s",
+            data[CONF_DEVICE_ID],
+        )
+
+    hass.data[DOMAIN][entry.entry_id] = {
+        "config": data,
+        "device_data": device_data,
+    }
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
@@ -169,7 +182,9 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     only the HA config payload is updated.
     """
     data = {**entry.data, **entry.options}
-    hass.data[DOMAIN][entry.entry_id] = data
+    bucket = hass.data[DOMAIN].get(entry.entry_id)
+    if isinstance(bucket, dict):
+        bucket["config"] = data
 
     device_id = data.get(CONF_DEVICE_ID)
     _LOGGER.info(
@@ -197,7 +212,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry, PLATFORMS
     )
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        bucket = hass.data[DOMAIN].pop(entry.entry_id, None)
+        if isinstance(bucket, dict):
+            device_data = bucket.get("device_data")
+            if isinstance(device_data, NublyDeviceData):
+                device_data.async_stop()
     return unload_ok
 
 

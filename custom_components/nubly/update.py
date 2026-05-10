@@ -181,7 +181,11 @@ class NublyFirmwareUpdate(CoordinatorEntity[NublyReleaseCoordinator], UpdateEnti
                 return
             if not isinstance(data, dict):
                 return
-            sw = data.get("sw_version")
+            sw = (
+                data.get("firmware_version")
+                or data.get("sw_version")
+                or data.get("version")
+            )
             if isinstance(sw, str) and sw and sw != self._installed_version:
                 self._installed_version = sw
                 self.async_write_ha_state()
