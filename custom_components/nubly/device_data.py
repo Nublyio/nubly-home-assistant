@@ -100,9 +100,16 @@ class NublyDeviceData:
 
     @callback
     def _on_ota_state(self, msg) -> None:
+        topic = getattr(msg, "topic", f"nubly/devices/{self.device_id}/ota/state")
         payload = msg.payload
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8", errors="replace")
+        _LOGGER.debug(
+            "NUBLY HA: OTA MQTT received topic=%s device=%s payload=%s",
+            topic,
+            self.device_id,
+            payload,
+        )
         if not payload:
             self.ota_state = {}
             self._notify()
@@ -110,14 +117,20 @@ class NublyDeviceData:
         try:
             data = json.loads(payload)
         except (json.JSONDecodeError, TypeError, ValueError):
+            _LOGGER.debug(
+                "NUBLY HA: OTA state payload not JSON for %s: %s",
+                self.device_id,
+                payload,
+            )
             return
         if not isinstance(data, dict):
             return
         self.ota_state = data
         _LOGGER.debug(
-            "NUBLY HA: device OTA progress update for %s -> %s",
+            "NUBLY HA: OTA state parsed for %s state=%s progress=%s",
             self.device_id,
-            data,
+            data.get("state"),
+            data.get("progress"),
         )
         self._notify()
 
@@ -135,6 +148,26 @@ class NublyDeviceData:
             self._notify()
 
 
+# Firmware OTA state machine — the device reports one of these strings on
+# nubly/devices/<id>/ota/state.
+OTA_ACTIVE_STATES: frozenset[str] = frozenset(
+    {"received", "validating", "connecting", "downloading", "writing"}
+)
+OTA_TERMINAL_STATES: frozenset[str] = frozenset({"idle", "success", "failed"})
+
+
+def ota_state_name(data: "NublyDeviceData") -> str | None:
+    """Return the current OTA state string (lowercased), or None."""
+    raw = None
+    if isinstance(data.ota_state, dict):
+        raw = data.ota_state.get("state") or data.ota_state.get("ota_state")
+    if raw is None and isinstance(data.attributes, dict):
+        raw = data.attributes.get("ota_state")
+    if isinstance(raw, str) and raw:
+        return raw.strip().lower()
+    return None
+
+
 def _ota_field(data: "NublyDeviceData", *keys: str):
     """Read an OTA field from ota_state first, then attributes."""
     for source in (data.ota_state, data.attributes):
@@ -148,7 +181,18 @@ def _ota_field(data: "NublyDeviceData", *keys: str):
     return None
 
 
-def ota_in_progress(data: "NublyDeviceData") -> bool:
+def ota_in_progress(data: "NublyDeviceData") -> bool | None:
+    """Whether an OTA install is currently active.
+
+    Drives Update.in_progress (must be bool | None, never numeric).
+    Prefers the explicit `state` field; falls back to legacy boolean fields.
+    """
+    state = ota_state_name(data)
+    if state in OTA_ACTIVE_STATES:
+        return True
+    if state in OTA_TERMINAL_STATES:
+        return False
+
     value = _ota_field(data, "ota_in_progress", "in_progress", "ota_active")
     if isinstance(value, bool):
         return value
@@ -156,11 +200,14 @@ def ota_in_progress(data: "NublyDeviceData") -> bool:
         return value.strip().lower() in ("true", "1", "yes", "on")
     if isinstance(value, (int, float)):
         return bool(value)
-    return False
+    return None
 
 
 def ota_progress_percent(data: "NublyDeviceData") -> int | None:
-    value = _ota_field(data, "ota_progress", "progress", "ota_percent")
+    """Numeric progress (0-100) only while an OTA is active; else None."""
+    if ota_in_progress(data) is not True:
+        return None
+    value = _ota_field(data, "progress", "ota_progress", "ota_percent")
     if value is None:
         return None
     try:

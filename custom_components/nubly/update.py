@@ -32,6 +32,7 @@ from .device_data import (
     ota_last_error,
     ota_last_result,
     ota_progress_percent,
+    ota_state_name,
 )
 from .firmware import (
     FirmwareInfo,
@@ -164,16 +165,15 @@ class NublyFirmwareUpdate(
         return info.release_url if info else None
 
     @property
-    def in_progress(self) -> bool | int:
-        if not ota_in_progress(self._device_data):
-            return False
-        pct = ota_progress_percent(self._device_data)
-        return pct if pct is not None else True
+    def in_progress(self) -> bool | None:
+        # Must remain bool | None — never numeric. The HA Update entity
+        # contract separates "is something running" from "how far along".
+        return ota_in_progress(self._device_data)
 
     @property
     def update_percentage(self) -> int | None:
-        if not ota_in_progress(self._device_data):
-            return None
+        # Only meaningful while in_progress is True; reset to None on
+        # idle/success/failed.
         return ota_progress_percent(self._device_data)
 
     @property
@@ -182,6 +182,16 @@ class NublyFirmwareUpdate(
         board = self._device_board()
         if board:
             attrs["board"] = board
+        state = ota_state_name(self._device_data)
+        if state:
+            attrs["ota_state"] = state
+        target = (
+            self._device_data.ota_state.get("target_version")
+            if isinstance(self._device_data.ota_state, dict)
+            else None
+        )
+        if target:
+            attrs["ota_target_version"] = target
         last_result = ota_last_result(self._device_data)
         if last_result:
             attrs["ota_last_result"] = last_result
@@ -214,22 +224,36 @@ class NublyFirmwareUpdate(
         ):
             self._installed_version = new_version
 
+        state = ota_state_name(self._device_data)
+        in_prog = ota_in_progress(self._device_data)
+        pct = ota_progress_percent(self._device_data)
+        _LOGGER.debug(
+            "NUBLY HA: OTA derived for device=%s state=%s in_progress=%s "
+            "update_percentage=%s",
+            self._device_id,
+            state,
+            in_prog,
+            pct,
+        )
+
         last_result = ota_last_result(self._device_data)
         last_error = ota_last_error(self._device_data)
-        if last_result == "success":
+        if state == "success" or last_result == "success":
             _LOGGER.debug(
                 "NUBLY HA: OTA completed for %s (version=%s)",
                 self._device_id,
                 self.installed_version,
             )
-        elif last_result and last_result != "success":
+        elif state == "failed" or (last_result and last_result != "success"):
             _LOGGER.debug(
-                "NUBLY HA: OTA failed for %s (result=%s, error=%s)",
+                "NUBLY HA: OTA failed for %s (state=%s result=%s error=%s)",
                 self._device_id,
+                state,
                 last_result,
                 last_error,
             )
 
+        # Always reflect MQTT OTA state changes on the entity.
         self.async_write_ha_state()
 
     async def async_install(
