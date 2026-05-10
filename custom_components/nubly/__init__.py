@@ -11,6 +11,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
+    CONF_ADDITIONAL_LIGHT_ENTITIES,
     CONF_DEVICE_ID,
     CONF_LIGHT_DISPLAY_NAME,
     CONF_LIGHT_ENTITY,
@@ -271,21 +272,34 @@ async def _publish_config(hass: HomeAssistant, data: dict) -> None:
     room_name = data[CONF_ROOM_NAME]
     room_id = _slugify_room_id(room_name) or device_id
 
-    light_entity = data.get(CONF_LIGHT_ENTITY)
-    light_name = (
+    primary_light_entity = data.get(CONF_LIGHT_ENTITY)
+    primary_light_name = (
         data.get(CONF_LIGHT_DISPLAY_NAME) or room_name or device_id
     )
-    lights = (
-        [
+
+    lights: list[dict] = []
+    seen: set[str] = set()
+    if primary_light_entity:
+        lights.append(
             {
-                "entity_id": light_entity,
-                "name": light_name,
+                "entity_id": primary_light_entity,
+                "name": primary_light_name,
                 "type": "dimmer",
             }
-        ]
-        if light_entity
-        else []
-    )
+        )
+        seen.add(primary_light_entity)
+
+    for extra in data.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []:
+        if not extra or extra in seen:
+            continue
+        seen.add(extra)
+        lights.append(
+            {
+                "entity_id": extra,
+                "name": _entity_friendly_name(hass, extra),
+                "type": "dimmer",
+            }
+        )
 
     timeout = int(
         data.get(CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT)
@@ -375,6 +389,16 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
         return
     await async_check_provisioning_support(hass)
     hass.data[DOMAIN][flag_key] = True
+
+
+def _entity_friendly_name(hass: HomeAssistant, entity_id: str) -> str:
+    """Return the entity's friendly_name, or the entity_id stripped of domain."""
+    state = hass.states.get(entity_id)
+    if state is not None:
+        name = state.attributes.get("friendly_name")
+        if isinstance(name, str) and name:
+            return name
+    return entity_id.split(".", 1)[-1].replace("_", " ").title()
 
 
 def _slugify_room_id(name: str | None) -> str:

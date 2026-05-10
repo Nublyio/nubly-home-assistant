@@ -1,12 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(chmod +x \"/Users/kjetillangerud/Documents/Dokumenter – Kjetil sin MacBook Pro/GitHub/nubly-home-assistant/scripts/release.sh\")",
-      "Bash(python -m py_compile custom_components/nubly/config_flow.py custom_components/nubly/__init__.py)",
-      "Bash(python -c \"import json; json.load\\(open\\('custom_components/nubly/strings.json'\\)\\)\")",
-      "Bash(python3 -m py_compile custom_components/nubly/config_flow.py custom_components/nubly/__init__.py)",
-      "Bash(python3 -c \"import json; json.load\\(open\\('custom_components/nubly/strings.json'\\)\\)\")",
-      "Bash(python3 -m py_compile custom_components/nubly/__init__.py)"
+      "Bash(*)",
+      "Read(//Users/kjetillangerud/**)",
+      "Read(//dev/**)",
+      "WebFetch(domain:www.waveshare.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)"
     ]
   }
 }

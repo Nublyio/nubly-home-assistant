@@ -19,6 +19,7 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from .const import (
+    CONF_ADDITIONAL_LIGHT_ENTITIES,
     CONF_DEVICE_ID,
     CONF_HOST,
     CONF_LIGHT_DISPLAY_NAME,
@@ -49,6 +50,9 @@ CONFIGURE_SCHEMA = vol.Schema(
             EntitySelectorConfig(domain="light"),
         ),
         vol.Required(CONF_LIGHT_DISPLAY_NAME): str,
+        vol.Optional(CONF_ADDITIONAL_LIGHT_ENTITIES, default=[]): EntitySelector(
+            EntitySelectorConfig(domain="light", multiple=True),
+        ),
         vol.Optional(CONF_WEATHER_ENTITY): EntitySelector(
             EntitySelectorConfig(domain="weather"),
         ),
@@ -249,6 +253,12 @@ class NublyOptionsFlow(OptionsFlow):
                 CONF_LIGHT_DISPLAY_NAME,
                 default=current.get(CONF_LIGHT_DISPLAY_NAME, ""),
             ): str,
+            vol.Optional(
+                CONF_ADDITIONAL_LIGHT_ENTITIES,
+                default=current.get(CONF_ADDITIONAL_LIGHT_ENTITIES, []) or [],
+            ): EntitySelector(
+                EntitySelectorConfig(domain="light", multiple=True),
+            ),
             vol.Required(
                 CONF_SCREENSAVER_TIMEOUT,
                 default=current.get(
