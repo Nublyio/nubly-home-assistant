@@ -95,10 +95,13 @@
         }
       },
       "screen_order": {
-        "title": "Screen order",
-        "description": "Pick which screens are enabled and in what swipe order. Selection order is the swipe order.",
+        "title": "Choose screen order",
+        "description": "Choose the order screens appear when swiping.",
         "data": {
-          "order": "Enabled screens (in order)"
+          "order": "Order"
+        },
+        "data_description": {
+          "order": "Selection order is the swipe order. Unselected screens are hidden."
         }
       },
       "scenes": {

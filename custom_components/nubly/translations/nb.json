@@ -95,10 +95,13 @@
         }
       },
       "screen_order": {
-        "title": "Skjermrekkefølge",
-        "description": "Velg hvilke skjermer som er aktive og i hvilken rekkefølge sveipingen skal vise dem. Valgrekkefølgen er sveiperekkefølgen.",
+        "title": "Velg skjermrekkefølge",
+        "description": "Velg hvilken rekkefølge skjermene skal vises i når du sveiper.",
         "data": {
-          "order": "Aktive skjermer (i rekkefølge)"
+          "order": "Rekkefølge"
+        },
+        "data_description": {
+          "order": "Valgrekkefølgen er sveiperekkefølgen. Skjermer som ikke er valgt, skjules."
         }
       },
       "scenes": {
