@@ -67,6 +67,15 @@ async def async_subscribe_commands(hass: HomeAssistant, device_id: str):
             _handle_play_favorite(hass, device_id, data)
             return
 
+        # Lazy browse: the device asks for children of a category. We call
+        # media_player.async_browse_media and publish the children back on
+        # a per-device response topic.
+        if command == "media/browse":
+            hass.async_create_task(
+                _handle_media_browse(hass, device_id, data)
+            )
+            return
+
         spec = _COMMAND_MAP.get(command)
         if spec is None:
             _LOGGER.debug("NUBLY HA: unknown command %s", command)
@@ -298,6 +307,207 @@ def _handle_play_favorite(
             media_content_type,
         )
     )
+
+
+async def _handle_media_browse(
+    hass: HomeAssistant, device_id: str, data: dict
+) -> None:
+    """Browse a media_player category and publish children on the response topic.
+
+    Request payload:
+      {
+        "request_id":         "abc123",         # optional, echoed in response
+        "media_content_id":   "FV:2/31",
+        "media_content_type": "..."             # optional
+      }
+
+    Response topic: nubly/devices/<device_id>/media/browse_response
+    Response payload:
+      {
+        "request_id":       "abc123",
+        "media_content_id": "FV:2/31",
+        "items": [
+          {"id":"item_1","title":"...","media_content_id":"...",
+           "media_content_type":"...","playable":bool,"expandable":bool,
+           "icon":"..."},
+          ...
+        ]
+      }
+
+    On error, `items` is empty and `error` carries a short reason string.
+    """
+    from .const import CONF_DEVICE_ID, DOMAIN as NUBLY_DOMAIN
+    from . import _browse_child_to_runtime  # type: ignore[attr-defined]
+
+    request_id = (data.get("request_id") or "").strip()
+    media_content_id = (data.get("media_content_id") or "").strip()
+    media_content_type = (data.get("media_content_type") or "").strip() or None
+
+    _LOGGER.info(
+        "NUBLY HA: media browse request device=%s request_id=%s "
+        "content_id=%s content_type=%s",
+        device_id,
+        request_id or "<none>",
+        media_content_id or "<none>",
+        media_content_type or "<none>",
+    )
+
+    response_topic = f"nubly/devices/{device_id}/media/browse_response"
+
+    if not media_content_id:
+        await _publish_browse_response(
+            hass, response_topic, request_id, "", [], error="missing_content_id"
+        )
+        return
+
+    # Find the device's configured media_player and its bucket.
+    configured_entity: str | None = None
+    bucket_ref: dict | None = None
+    for bucket in (hass.data.get(NUBLY_DOMAIN) or {}).values():
+        if not isinstance(bucket, dict):
+            continue
+        cfg = bucket.get("config") or {}
+        if cfg.get(CONF_DEVICE_ID) != device_id:
+            continue
+        structured = bucket.get("structured") or {}
+        media_cfg = (structured.get("screens") or {}).get("media") or {}
+        configured_entity = (media_cfg.get("entity_id") or "").strip() or None
+        bucket_ref = bucket
+        break
+
+    if not configured_entity:
+        _LOGGER.warning(
+            "NUBLY HA: media browse — no media_player configured for device=%s",
+            device_id,
+        )
+        await _publish_browse_response(
+            hass,
+            response_topic,
+            request_id,
+            media_content_id,
+            [],
+            error="no_media_entity",
+        )
+        return
+
+    component = hass.data.get("media_player")
+    if component is None:
+        await _publish_browse_response(
+            hass,
+            response_topic,
+            request_id,
+            media_content_id,
+            [],
+            error="media_player_unavailable",
+        )
+        return
+    player = component.get_entity(configured_entity)
+    if player is None:
+        await _publish_browse_response(
+            hass,
+            response_topic,
+            request_id,
+            media_content_id,
+            [],
+            error="entity_not_found",
+        )
+        return
+
+    try:
+        node = await player.async_browse_media(
+            media_content_type, media_content_id
+        )
+    except Exception as err:
+        _LOGGER.warning(
+            "NUBLY HA: media browse raised device=%s content_id=%s: %s",
+            device_id,
+            media_content_id,
+            err,
+        )
+        await _publish_browse_response(
+            hass,
+            response_topic,
+            request_id,
+            media_content_id,
+            [],
+            error="browse_failed",
+        )
+        return
+
+    items: list[dict] = []
+    new_ids: set[str] = set()
+    for idx, child in enumerate(
+        getattr(node, "children", None) or [], start=1
+    ):
+        entry = _browse_child_to_runtime(child)
+        if entry is None:
+            continue
+        entry["id"] = f"item_{idx}"
+        items.append(entry)
+        new_ids.add(entry["media_content_id"])
+
+    if not items:
+        _LOGGER.info(
+            "NUBLY HA: media browse empty device=%s content_id=%s "
+            "(category has no children or is not browsable)",
+            device_id,
+            media_content_id,
+        )
+
+    # Extend the play_favorite allow-list with the newly seen content_ids
+    # so the device can immediately play any of these without a republish.
+    if bucket_ref is not None and new_ids:
+        existing = bucket_ref.get("favorite_ids") or set()
+        if isinstance(existing, set):
+            bucket_ref["favorite_ids"] = existing | new_ids
+        else:
+            bucket_ref["favorite_ids"] = set(existing) | new_ids
+
+    _LOGGER.info(
+        "NUBLY HA: media browse response device=%s content_id=%s children=%d",
+        device_id,
+        media_content_id,
+        len(items),
+    )
+    await _publish_browse_response(
+        hass, response_topic, request_id, media_content_id, items
+    )
+
+
+async def _publish_browse_response(
+    hass: HomeAssistant,
+    topic: str,
+    request_id: str,
+    media_content_id: str,
+    items: list[dict],
+    *,
+    error: str | None = None,
+) -> None:
+    """Publish a per-request browse response. Not retained — request-scoped."""
+    payload: dict = {
+        "request_id": request_id,
+        "media_content_id": media_content_id,
+        "items": items,
+    }
+    if error:
+        payload["error"] = error
+    try:
+        await hass.services.async_call(
+            "mqtt",
+            "publish",
+            {
+                "topic": topic,
+                "payload": json.dumps(payload),
+                "qos": 0,
+                "retain": False,
+            },
+            blocking=False,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "NUBLY HA: media browse response publish failed topic=%s",
+            topic,
+        )
 
 
 async def _async_call_play_media(

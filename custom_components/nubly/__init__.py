@@ -684,27 +684,41 @@ async def _favorites_via_browser(
     out: list[dict] = []
     seen_ids: set[str] = set()
     for child in (getattr(contents, "children", None) or []):
-        title = getattr(child, "title", None)
-        content_id = getattr(child, "media_content_id", None)
-        content_type = getattr(child, "media_content_type", None)
-        if not title or not content_id:
+        entry = _browse_child_to_runtime(child)
+        if entry is None:
             continue
-        if content_id in seen_ids:
+        if entry["media_content_id"] in seen_ids:
             continue
-        seen_ids.add(content_id)
-        entry: dict = {
-            "id": f"fav_{len(out) + 1}",
-            "title": title,
-            "media_content_id": content_id,
-            "media_content_type": content_type or "favorite_item_id",
-        }
-        thumbnail = getattr(child, "thumbnail", None)
-        if thumbnail:
-            entry["icon"] = thumbnail
+        seen_ids.add(entry["media_content_id"])
+        entry["id"] = f"fav_{len(out) + 1}"
         out.append(entry)
         if len(out) >= max_count:
             break
     return out
+
+
+def _browse_child_to_runtime(child) -> dict | None:
+    """Normalize a BrowseMedia child into the runtime-payload dict shape.
+
+    Captures `playable`/`expandable` so the device can decide whether the
+    item plays directly or has to be browsed into for its children.
+    """
+    title = getattr(child, "title", None)
+    content_id = getattr(child, "media_content_id", None)
+    if not title or not content_id:
+        return None
+    entry: dict = {
+        "title": title,
+        "media_content_id": content_id,
+        "media_content_type": getattr(child, "media_content_type", None)
+        or "favorite_item_id",
+        "playable": bool(getattr(child, "can_play", False)),
+        "expandable": bool(getattr(child, "can_expand", False)),
+    }
+    thumbnail = getattr(child, "thumbnail", None)
+    if thumbnail:
+        entry["icon"] = thumbnail
+    return entry
 
 
 def _favorites_via_sensor(hass: HomeAssistant, max_count: int) -> list[dict]:
@@ -735,6 +749,9 @@ def _favorites_via_sensor(hass: HomeAssistant, max_count: int) -> list[dict]:
             "media_content_id": content_id,
             "media_content_type": item.get("media_content_type")
             or "favorite_item_id",
+            # Sensor-sourced favorites are always direct playable items.
+            "playable": True,
+            "expandable": False,
         }
         icon = item.get("thumbnail") or item.get("icon")
         if icon:
