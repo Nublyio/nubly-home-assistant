@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
@@ -402,9 +403,12 @@ async def _publish_config(
             room["media"]["label"] = media["label"]
 
         if media.get("favorites_enabled"):
-            favorites = _resolve_media_favorites(hass, device_id, media)
+            favorites = await _resolve_media_favorites(hass, device_id, media)
             if favorites:
                 room["media"]["favorites"] = favorites
+            # Cache the allow-list so the play_favorite command handler can
+            # validate synchronously on the MQTT receive path.
+            _stash_favorite_ids(hass, device_id, favorites)
 
     weather = screens.get("weather") or {}
     if weather.get("entity_id"):
@@ -534,38 +538,186 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][flag_key] = True
 
 
-def _resolve_media_favorites(
+def _stash_favorite_ids(
+    hass: HomeAssistant, device_id: str, favorites: list[dict]
+) -> None:
+    """Cache the published favorite content_ids per device for fast lookup."""
+    ids = {
+        f["media_content_id"]
+        for f in favorites
+        if isinstance(f, dict) and f.get("media_content_id")
+    }
+    for bucket in (hass.data.get(DOMAIN) or {}).values():
+        if not isinstance(bucket, dict):
+            continue
+        cfg = bucket.get("config") or {}
+        if cfg.get(CONF_DEVICE_ID) == device_id:
+            bucket["favorite_ids"] = ids
+            return
+
+
+async def _resolve_media_favorites(
     hass: HomeAssistant, device_id: str, media_cfg: dict
 ) -> list[dict]:
-    """Resolve a stored media-favorites config into the runtime payload list.
+    """Auto-discover favorites for the configured media_player.
 
-    Source of truth is a Sonos favorites sensor (default sensor.sonos_favorites)
-    whose `items` attribute carries `{title, item_id, ...}` entries.
-    The include-filter (if set) limits the published list to titles the
-    user selected in the options flow.
+    Detection order:
+      1. Verify the entity belongs to the Sonos integration (entity registry
+         platform == 'sonos'). Non-Sonos entities are skipped.
+      2. Try Media Browser via the entity's `async_browse_media` — locate the
+         Favorites node and enumerate its children.
+      3. Fall back to `sensor.sonos_favorites` (HA's per-system favorites
+         sensor) when the browser path returns nothing.
+
+    The resolver never raises — every failure path logs the exact reason
+    and returns []. The runtime config simply omits favorites in that case.
     """
-    source_entity = (media_cfg.get("favorites_source") or "sensor.sonos_favorites").strip()
-    state = hass.states.get(source_entity)
-    if state is None:
+    entity_id = (media_cfg.get("entity_id") or "").strip()
+    if not entity_id:
+        return []
+
+    max_count = int(media_cfg.get("favorites_max") or 12)
+
+    if not _is_sonos_entity(hass, entity_id):
         _LOGGER.debug(
-            "NUBLY HA: favorites source %s not found for device=%s",
-            source_entity,
+            "NUBLY HA: favorites skipped — entity=%s is not from the Sonos "
+            "integration (device=%s)",
+            entity_id,
             device_id,
         )
         return []
 
+    _LOGGER.debug(
+        "NUBLY HA: favorites Sonos detected for entity=%s device=%s — "
+        "attempting Media Browser discovery",
+        entity_id,
+        device_id,
+    )
+
+    favorites = await _favorites_via_browser(hass, entity_id, max_count)
+    source = "media_browser"
+    if not favorites:
+        favorites = _favorites_via_sensor(hass, max_count)
+        source = "sensor.sonos_favorites"
+
+    _LOGGER.info(
+        "NUBLY HA: media favorites discovered device=%s entity=%s source=%s "
+        "count=%d max=%d",
+        device_id,
+        entity_id,
+        source if favorites else "<none>",
+        len(favorites),
+        max_count,
+    )
+    _LOGGER.debug(
+        "NUBLY HA: media favorites entries=%s",
+        [{"id": f["id"], "title": f["title"]} for f in favorites],
+    )
+    return favorites
+
+
+def _is_sonos_entity(hass: HomeAssistant, entity_id: str) -> bool:
+    """True when the entity is registered against the Sonos integration."""
+    try:
+        registry = er.async_get(hass)
+        entry = registry.async_get(entity_id)
+        return bool(entry and entry.platform == "sonos")
+    except Exception:
+        _LOGGER.debug(
+            "NUBLY HA: Sonos detection raised for entity=%s — treating as non-Sonos",
+            entity_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def _favorites_via_browser(
+    hass: HomeAssistant, entity_id: str, max_count: int
+) -> list[dict]:
+    """Enumerate Sonos favorites via the entity's media_browser tree."""
+    component = hass.data.get("media_player")
+    if component is None:
+        _LOGGER.debug("NUBLY HA: favorites browser — media_player component unavailable")
+        return []
+    player = component.get_entity(entity_id)
+    if player is None:
+        _LOGGER.debug("NUBLY HA: favorites browser — entity %s not registered", entity_id)
+        return []
+
+    try:
+        root = await player.async_browse_media()
+    except Exception as err:
+        _LOGGER.debug(
+            "NUBLY HA: favorites browser root raised for %s: %s",
+            entity_id,
+            err,
+        )
+        return []
+
+    favorites_node = None
+    for child in (getattr(root, "children", None) or []):
+        cid = (getattr(child, "media_content_id", "") or "").lower()
+        title = (getattr(child, "title", "") or "").lower()
+        if "favorit" in title or "favorit" in cid:
+            favorites_node = child
+            break
+    if favorites_node is None:
+        _LOGGER.debug(
+            "NUBLY HA: favorites browser — no Favorites child in root for %s",
+            entity_id,
+        )
+        return []
+
+    try:
+        contents = await player.async_browse_media(
+            getattr(favorites_node, "media_content_type", None),
+            getattr(favorites_node, "media_content_id", None),
+        )
+    except Exception as err:
+        _LOGGER.debug(
+            "NUBLY HA: favorites browser favorites-node raised for %s: %s",
+            entity_id,
+            err,
+        )
+        return []
+
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    for child in (getattr(contents, "children", None) or []):
+        title = getattr(child, "title", None)
+        content_id = getattr(child, "media_content_id", None)
+        content_type = getattr(child, "media_content_type", None)
+        if not title or not content_id:
+            continue
+        if content_id in seen_ids:
+            continue
+        seen_ids.add(content_id)
+        entry: dict = {
+            "id": f"fav_{len(out) + 1}",
+            "title": title,
+            "media_content_id": content_id,
+            "media_content_type": content_type or "favorite_item_id",
+        }
+        thumbnail = getattr(child, "thumbnail", None)
+        if thumbnail:
+            entry["icon"] = thumbnail
+        out.append(entry)
+        if len(out) >= max_count:
+            break
+    return out
+
+
+def _favorites_via_sensor(hass: HomeAssistant, max_count: int) -> list[dict]:
+    """Fallback: read `sensor.sonos_favorites` attributes."""
+    state = hass.states.get("sensor.sonos_favorites")
+    if state is None:
+        _LOGGER.debug("NUBLY HA: favorites sensor sensor.sonos_favorites not found")
+        return []
     items = state.attributes.get("items") or []
     if not isinstance(items, list):
         return []
 
-    include = media_cfg.get("favorites_include") or []
-    include_set: set[str] = {
-        x for x in include if isinstance(x, str) and x
-    }
-    max_count = int(media_cfg.get("favorites_max") or 12)
-
-    discovered: list[dict] = []
-    runtime: list[dict] = []
+    out: list[dict] = []
     seen_ids: set[str] = set()
     for item in items:
         if not isinstance(item, dict):
@@ -574,18 +726,11 @@ def _resolve_media_favorites(
         content_id = (
             item.get("item_id") or item.get("id") or item.get("media_content_id")
         )
-        if not title or not content_id:
-            continue
-        discovered.append({"title": title, "id": content_id})
-
-        if include_set and title not in include_set:
-            continue
-        if content_id in seen_ids:
+        if not title or not content_id or content_id in seen_ids:
             continue
         seen_ids.add(content_id)
-
         entry: dict = {
-            "id": f"fav_{len(runtime) + 1}",
+            "id": f"fav_{len(out) + 1}",
             "title": title,
             "media_content_id": content_id,
             "media_content_type": item.get("media_content_type")
@@ -594,29 +739,10 @@ def _resolve_media_favorites(
         icon = item.get("thumbnail") or item.get("icon")
         if icon:
             entry["icon"] = icon
-        source = item.get("source") or item.get("provider")
-        if source:
-            entry["source"] = source
-        runtime.append(entry)
-
-        if len(runtime) >= max_count:
+        out.append(entry)
+        if len(out) >= max_count:
             break
-
-    _LOGGER.info(
-        "NUBLY HA: media favorites resolved device=%s source=%s "
-        "discovered=%d included=%d (max=%d)",
-        device_id,
-        source_entity,
-        len(discovered),
-        len(runtime),
-        max_count,
-    )
-    _LOGGER.debug(
-        "NUBLY HA: media favorites discovered=%s included=%s",
-        discovered,
-        runtime,
-    )
-    return runtime
+    return out
 
 
 def _scene_buttons_payload(stored) -> list[dict]:

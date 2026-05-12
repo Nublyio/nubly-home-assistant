@@ -70,19 +70,16 @@
       },
       "media": {
         "title": "Mediaspiller",
-        "description": "Velg media_player som skal vises på mediaskjermen. Du kan også eksponere favoritter fra en Sonos-favorittsensor.",
+        "description": "Velg media_player som skal vises på mediaskjermen. Når en Sonos-spiller velges, hentes favoritter automatisk fra den.",
         "data": {
           "entity_id": "Mediaspiller-entitet",
           "label": "Visningsnavn",
-          "favorites_enabled": "Aktiver favoritter",
-          "favorites_source": "Favorittsensor",
-          "favorites_max": "Maks antall favoritter",
-          "favorites_include": "Favoritter som skal vises (tom = alle)"
+          "favorites_enabled": "Vis Sonos-favoritter",
+          "favorites_max": "Maks antall favoritter"
         },
         "data_description": {
-          "favorites_source": "Standard er sensor.sonos_favorites hvis den finnes.",
-          "favorites_max": "Begrenser antallet favoritter som sendes til enheten.",
-          "favorites_include": "Velg et utvalg etter tittel. La feltet være tomt for å vise alle (opp til maks)."
+          "favorites_enabled": "Tar bare effekt når valgt media_player er en Sonos-enhet.",
+          "favorites_max": "Begrenser antallet favoritter som sendes til enheten."
         }
       },
       "weather": {

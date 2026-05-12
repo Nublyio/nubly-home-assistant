@@ -262,12 +262,17 @@ def _handle_play_favorite(
         )
         return
 
-    # The favorite must be one we actually published to this device. We
-    # resolve the published list lazily by re-reading the favorites
-    # source so the user doesn't have to round-trip a save when their
-    # Sonos library changes.
-    favorites = _published_favorites_for_validation(hass, media_cfg)
-    allowed_ids = {f["media_content_id"] for f in favorites}
+    # The favorite must be one we actually published to this device.
+    # The publisher caches the allow-list synchronously after each
+    # `_publish_config`, so the receive path stays non-blocking.
+    allowed_ids: set = set()
+    for bucket in (hass.data.get(NUBLY_DOMAIN) or {}).values():
+        if not isinstance(bucket, dict):
+            continue
+        cfg = bucket.get("config") or {}
+        if cfg.get(CONF_DEVICE_ID) == device_id:
+            allowed_ids = bucket.get("favorite_ids") or set()
+            break
     if media_content_id not in allowed_ids:
         _LOGGER.warning(
             "NUBLY HA: play_favorite media_content_id not in allow-list "
@@ -293,16 +298,6 @@ def _handle_play_favorite(
             media_content_type,
         )
     )
-
-
-def _published_favorites_for_validation(
-    hass: HomeAssistant, media_cfg: dict
-) -> list[dict]:
-    """Re-resolve the favorites list with the same logic as the publisher."""
-    # Local import to avoid an import cycle with __init__.py.
-    from . import _resolve_media_favorites  # type: ignore[attr-defined]
-
-    return _resolve_media_favorites(hass, "<validation>", media_cfg)
 
 
 async def _async_call_play_media(
