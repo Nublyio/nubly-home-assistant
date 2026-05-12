@@ -65,18 +65,31 @@ BOARD_CAPABILITIES: dict[str, dict[str, int]] = {
     BOARD_LCD_5: {
         "cover_art_max_width": 1024,
         "cover_art_max_height": 600,
+        "scene_button_count": 6,
     },
     BOARD_ROUND_1_43: {
         "cover_art_max_width": 466,
         "cover_art_max_height": 466,
+        "scene_button_count": 4,
     },
 }
+
+DEFAULT_SCENE_BUTTON_COUNT = 4
 
 # Conservative fallback when a device's board cannot be determined.
 DEFAULT_COVER_ART_BOUNDS: dict[str, int] = {
     "cover_art_max_width": 480,
     "cover_art_max_height": 480,
 }
+
+
+def scene_button_count(board: str | None) -> int:
+    """Number of scene button slots a given board exposes in its UI."""
+    if board and board in BOARD_CAPABILITIES:
+        return int(BOARD_CAPABILITIES[board].get(
+            "scene_button_count", DEFAULT_SCENE_BUTTON_COUNT
+        ))
+    return DEFAULT_SCENE_BUTTON_COUNT
 
 
 def cover_art_bounds(board: str | None) -> tuple[int, int, bool]:

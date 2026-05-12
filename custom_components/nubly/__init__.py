@@ -11,19 +11,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import (
-    CONF_ADDITIONAL_LIGHT_ENTITIES,
+    CONF_CONFIG,
     CONF_DEVICE_ID,
-    CONF_HUMIDITY_ENTITY,
-    CONF_LIGHT_DISPLAY_NAME,
-    CONF_LIGHT_ENTITY,
-    CONF_LIGHT_NAMES,
-    CONF_MEDIA_ENTITY,
     CONF_MODEL,
     CONF_ROOM_NAME,
-    CONF_SCREENSAVER_TIMEOUT,
     CONF_SW_VERSION,
-    CONF_TEMPERATURE_ENTITY,
-    CONF_WEATHER_ENTITY,
     DEFAULT_SCREENSAVER_TIMEOUT,
     DOMAIN,
     LEGACY_DEVICE_ID,
@@ -31,6 +23,7 @@ from .const import (
 from .commands import async_subscribe_commands
 from .device_data import NublyDeviceData
 from .discovery import async_discover_devices
+from .nubly_config import ensure_structured
 from .provisioning import async_check_provisioning_support
 from .view import NublyCoverArtView
 
@@ -122,8 +115,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("NUBLY HA: rediscovery block raised an exception")
 
-    if entry.options:
-        data.update(entry.options)
+    # Migrate any pre-v2 flat config into the structured shape and persist
+    # it under entry.options[CONF_CONFIG]. Idempotent — runs only when no
+    # structured config is present yet.
+    structured, migrated = ensure_structured(data, dict(entry.options))
+    if migrated:
+        new_options = {**entry.options, CONF_CONFIG: structured}
+        hass.config_entries.async_update_entry(entry, options=new_options)
 
     device_data = NublyDeviceData(hass, data[CONF_DEVICE_ID])
     try:
@@ -135,7 +133,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     hass.data[DOMAIN][entry.entry_id] = {
-        "config": data,
+        # Keep the legacy flat dict around for compatibility with code paths
+        # that still read it (e.g. cover-art view). All publishing now uses
+        # `structured`.
+        "config": {**data, **{k: v for k, v in entry.options.items() if k != CONF_CONFIG}},
+        "structured": structured,
         "device_data": device_data,
     }
 
@@ -147,7 +149,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, device_id)},
         manufacturer="Nubly",
-        name=data.get(CONF_ROOM_NAME) or device_id,
+        name=structured["room"].get("name") or device_id,
         model=data.get(CONF_MODEL),
         sw_version=data.get(CONF_SW_VERSION),
     )
@@ -162,7 +164,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.exception("NUBLY HA: command subscribe failed")
 
     try:
-        await _publish_config(hass, data)
+        await _publish_config(hass, device_id, structured)
     except Exception:
         _LOGGER.exception("NUBLY HA: publish block raised an exception")
 
@@ -185,27 +187,35 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     No Wi-Fi/MQTT provisioning, no Mosquitto restart, no /provision POST —
     only the HA config payload is updated.
     """
-    data = {**entry.data, **entry.options}
+    data = dict(entry.data)
+    structured, _ = ensure_structured(data, dict(entry.options))
+
     bucket = hass.data[DOMAIN].get(entry.entry_id)
     if isinstance(bucket, dict):
-        bucket["config"] = data
+        bucket["structured"] = structured
+        # Keep the legacy flat view fresh too — used by cover-art view.
+        bucket["config"] = {
+            **data,
+            **{k: v for k, v in entry.options.items() if k != CONF_CONFIG},
+        }
 
     device_id = data.get(CONF_DEVICE_ID)
     _LOGGER.info(
-        "NUBLY HA: options updated for device_id = %s, republishing config",
+        "NUBLY HA: options saved device_id=%s republishing schema_version=%s",
         device_id,
+        structured.get("schema_version"),
     )
 
     if device_id:
         dev_reg = dr.async_get(hass)
         device = dev_reg.async_get_device(identifiers={(DOMAIN, device_id)})
         if device is not None:
-            new_name = data.get(CONF_ROOM_NAME) or device_id
+            new_name = structured["room"].get("name") or device_id
             if device.name != new_name:
                 dev_reg.async_update_device(device.id, name=new_name)
 
     try:
-        await _publish_config(hass, data)
+        await _publish_config(hass, device_id, structured)
     except Exception:
         _LOGGER.exception("NUBLY HA: republish on options update failed")
 
@@ -268,82 +278,87 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.exception("NUBLY HA: failed to send unprovision command")
 
 
-async def _publish_config(hass: HomeAssistant, data: dict) -> None:
-    """Publish device configuration to MQTT."""
-    device_id = data[CONF_DEVICE_ID]
+async def _publish_config(
+    hass: HomeAssistant, device_id: str, structured: dict
+) -> None:
+    """Publish runtime device configuration to MQTT.
 
-    room_name = data[CONF_ROOM_NAME]
-    room_id = _slugify_room_id(room_name) or device_id
+    Builds the firmware-compatible `room_controller` payload from the
+    structured config and adds a top-level `schema_version` field so the
+    device (and future firmware) can branch on shape changes.
+    """
+    room_meta = structured.get("room") or {}
+    screens = structured.get("screens") or {}
+    screensaver = structured.get("screensaver") or {}
 
-    primary_light_entity = data.get(CONF_LIGHT_ENTITY)
-    primary_light_name = (
-        data.get(CONF_LIGHT_DISPLAY_NAME) or room_name or device_id
-    )
+    room_name = room_meta.get("name") or device_id
+    room_id = room_meta.get("id") or device_id
 
+    # Lights — translate {entity_id,label,icon} -> firmware {entity_id,name,type}.
     lights: list[dict] = []
-    seen: set[str] = set()
-    if primary_light_entity:
-        lights.append(
-            {
-                "entity_id": primary_light_entity,
-                "name": primary_light_name,
-                "type": "dimmer",
-            }
-        )
-        seen.add(primary_light_entity)
-
-    light_names = data.get(CONF_LIGHT_NAMES) or {}
-    for extra in data.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []:
-        if not extra or extra in seen:
+    for entry in (screens.get("lights") or {}).get("entities") or []:
+        if not isinstance(entry, dict):
             continue
-        seen.add(extra)
-        custom_name = (light_names.get(extra) or "").strip() if isinstance(
-            light_names, dict
-        ) else ""
+        entity_id = (entry.get("entity_id") or "").strip()
+        if not entity_id:
+            continue
         lights.append(
             {
-                "entity_id": extra,
-                "name": custom_name or _entity_friendly_name(hass, extra),
+                "entity_id": entity_id,
+                "name": (entry.get("label") or "").strip()
+                or _entity_friendly_name(hass, entity_id),
                 "type": "dimmer",
             }
         )
-
-    timeout = int(
-        data.get(CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT)
-    )
 
     room: dict = {
         "id": room_id,
         "name": room_name,
         "lights": lights,
-        "scenes": [],
+        "scenes": _scene_buttons_payload(structured.get("scene_buttons")),
     }
 
-    media_entity = data.get(CONF_MEDIA_ENTITY)
-    if media_entity:
+    media = screens.get("media") or {}
+    if media.get("entity_id"):
         room["media"] = {
-            "entity_id": media_entity,
+            "entity_id": media["entity_id"],
             "cover_art_url": _build_cover_art_url(hass, device_id),
         }
+        if media.get("label"):
+            room["media"]["label"] = media["label"]
 
-    weather_entity = data.get(CONF_WEATHER_ENTITY)
-    if weather_entity:
-        room["weather"] = {"entity_id": weather_entity}
+    weather = screens.get("weather") or {}
+    if weather.get("entity_id"):
+        room["weather"] = {"entity_id": weather["entity_id"]}
 
-    temperature_entity = data.get(CONF_TEMPERATURE_ENTITY)
-    humidity_entity = data.get(CONF_HUMIDITY_ENTITY)
-    if temperature_entity or humidity_entity:
-        ambient: dict = {}
-        if temperature_entity:
-            ambient["temperature_entity"] = temperature_entity
-        if humidity_entity:
-            ambient["humidity_entity"] = humidity_entity
-        room["ambient"] = ambient
+    ambient = screens.get("ambient") or {}
+    if ambient.get("temperature_entity") or ambient.get("humidity_entity"):
+        room["ambient"] = {
+            k: v
+            for k, v in {
+                "temperature_entity": ambient.get("temperature_entity"),
+                "humidity_entity": ambient.get("humidity_entity"),
+            }.items()
+            if v
+        }
+
+    timeout = int(
+        screensaver.get("timeout_seconds")
+        or DEFAULT_SCREENSAVER_TIMEOUT
+    )
 
     payload = {
+        "schema_version": int(structured.get("schema_version") or 2),
         "mode": "room_controller",
         "device_id": device_id,
         "room": room,
+        "screensaver": {
+            "enabled": bool(screensaver.get("enabled", True)),
+            "type": screensaver.get("type") or "analog_clock",
+            "timeout_seconds": timeout,
+        },
+        # Legacy top-level alias still consumed by current firmware until
+        # the device branches on schema_version.
         "screensaver_timeout": timeout,
     }
 
@@ -406,6 +421,41 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
         return
     await async_check_provisioning_support(hass)
     hass.data[DOMAIN][flag_key] = True
+
+
+def _scene_buttons_payload(stored) -> list[dict]:
+    """Translate structured scene_buttons into the runtime MQTT shape.
+
+    Drops disabled or entity-less entries. Preserves order.
+    """
+    if not isinstance(stored, list):
+        return []
+    out: list[dict] = []
+    for entry in stored:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("enabled", True):
+            continue
+        target = (
+            entry.get("target_entity") or entry.get("entity_id") or ""
+        ).strip()
+        if not target:
+            continue
+        scene: dict = {
+            "id": entry.get("id") or f"scene_{len(out) + 1}",
+            "entity_id": target,
+            "label": entry.get("label") or target,
+        }
+        icon = (entry.get("icon") or "").strip()
+        if icon:
+            scene["icon"] = icon
+        out.append(scene)
+    _LOGGER.debug(
+        "NUBLY HA: scene_buttons payload built count=%d entries=%s",
+        len(out),
+        out,
+    )
+    return out
 
 
 def _entity_friendly_name(hass: HomeAssistant, entity_id: str) -> str:

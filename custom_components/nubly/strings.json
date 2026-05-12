@@ -14,19 +14,15 @@
       "provisioning_failed": "Could not provision the Nubly device — check that it is online and reachable on the network."
     },
     "step": {
-      "configure": {
-        "title": "Configure Nubly",
-        "description": "Device {device_id}"
-      },
       "pick_device": {
         "title": "Select Nubly device"
       },
       "manual": {
         "title": "Enter Nubly device ID"
       },
-      "light_names": {
-        "title": "Light names",
-        "description": "Set a display name for each additional light. Leave a field empty to use the entity's friendly name."
+      "onboard": {
+        "title": "Add Nubly device",
+        "description": "Device {device_id}. After adding, open the integration's Configure menu to set up lights, media, scenes, and the screensaver."
       }
     }
   },
@@ -34,12 +30,46 @@
     "step": {
       "init": {
         "title": "Nubly settings",
-        "description": "Update room and entity settings. Changes are sent to the device over MQTT."
+        "menu_options": {
+          "general": "General",
+          "lights": "Lights",
+          "media": "Media",
+          "weather": "Weather & ambient sensors",
+          "screensaver": "Screensaver",
+          "scenes": "Scene buttons"
+        }
       },
-      "light_names": {
-        "title": "Light names",
-        "description": "Set a display name for each additional light."
+      "general": {
+        "title": "General",
+        "description": "Set the room name shown on the device."
+      },
+      "lights": {
+        "title": "Lights",
+        "description": "Pick the lights to expose on this device. You'll set their labels and icons on the next page."
+      },
+      "lights_detail": {
+        "title": "Light labels",
+        "description": "Set a display name and optional icon for: {entities}"
+      },
+      "media": {
+        "title": "Media player",
+        "description": "Select the media_player to show on the media screen."
+      },
+      "weather": {
+        "title": "Weather & ambient sensors",
+        "description": "Optional weather entity and room temperature/humidity sensors."
+      },
+      "screensaver": {
+        "title": "Screensaver",
+        "description": "Enable the screensaver and pick its idle timeout."
+      },
+      "scenes": {
+        "title": "Scene buttons",
+        "description": "Configure up to {count} scene buttons. Each row binds one button to a Home Assistant scene or script."
       }
+    },
+    "error": {
+      "entity_not_found": "The selected entity does not exist in Home Assistant."
     }
   }
 }

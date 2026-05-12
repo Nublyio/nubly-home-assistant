@@ -9,6 +9,11 @@ CONF_LIGHT_ENTITY = "light_entity"
 CONF_LIGHT_DISPLAY_NAME = "light_display_name"
 CONF_ADDITIONAL_LIGHT_ENTITIES = "additional_light_entities"
 CONF_LIGHT_NAMES = "light_names"
+CONF_SCENES = "scenes"
+
+# Top-level key on entry.options holding the migrated, structured config.
+CONF_CONFIG = "config"
+CONFIG_SCHEMA_VERSION = 2
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_TEMPERATURE_ENTITY = "temperature_entity"
 CONF_HUMIDITY_ENTITY = "humidity_entity"

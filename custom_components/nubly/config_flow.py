@@ -1,4 +1,12 @@
-"""Config flow for the Nubly integration."""
+"""Config flow for the Nubly integration.
+
+The initial flow is intentionally minimal — it just onboards the device
+(discovery, provisioning, room name). Everything else is configured via
+the options flow, which presents a menu of sections (General, Room,
+Lights, Media, Weather, Screensaver, Scene buttons).
+"""
+
+from __future__ import annotations
 
 import logging
 
@@ -7,8 +15,10 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     EntitySelector,
     EntitySelectorConfig,
+    IconSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -19,78 +29,32 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from .const import (
-    CONF_ADDITIONAL_LIGHT_ENTITIES,
+    CONF_CONFIG,
     CONF_DEVICE_ID,
     CONF_HOST,
-    CONF_HUMIDITY_ENTITY,
-    CONF_LIGHT_DISPLAY_NAME,
-    CONF_LIGHT_ENTITY,
-    CONF_LIGHT_NAMES,
-    CONF_MEDIA_ENTITY,
     CONF_MODEL,
     CONF_PORT,
-    CONF_ROOM_NAME,
-    CONF_SCREENSAVER_TIMEOUT,
     CONF_SW_VERSION,
-    CONF_TEMPERATURE_ENTITY,
-    CONF_WEATHER_ENTITY,
+    CONFIG_SCHEMA_VERSION,
     DEFAULT_SCREENSAVER_TIMEOUT,
     DOMAIN,
 )
 from .discovery import async_discover_devices
+from .firmware import normalize_board, scene_button_count
+from .nubly_config import (
+    ensure_structured,
+    empty_structured,
+    replace_section,
+    slugify,
+)
 from .provisioning import async_provision_device
 
 _LOGGER = logging.getLogger(__name__)
 
+# Domains accepted as a scene button target.
+_SCENE_TARGET_DOMAINS = ("scene", "script")
 
-CONFIGURE_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_ROOM_NAME): str,
-        vol.Required(CONF_MEDIA_ENTITY): EntitySelector(
-            EntitySelectorConfig(domain="media_player"),
-        ),
-        vol.Required(CONF_LIGHT_ENTITY): EntitySelector(
-            EntitySelectorConfig(domain="light"),
-        ),
-        vol.Required(CONF_LIGHT_DISPLAY_NAME): str,
-        vol.Optional(CONF_ADDITIONAL_LIGHT_ENTITIES, default=[]): EntitySelector(
-            EntitySelectorConfig(domain="light", multiple=True),
-        ),
-        vol.Optional(CONF_WEATHER_ENTITY): EntitySelector(
-            EntitySelectorConfig(domain="weather"),
-        ),
-        vol.Optional(CONF_TEMPERATURE_ENTITY): EntitySelector(
-            EntitySelectorConfig(
-                domain="sensor", device_class="temperature"
-            ),
-        ),
-        vol.Optional(CONF_HUMIDITY_ENTITY): EntitySelector(
-            EntitySelectorConfig(domain="sensor", device_class="humidity"),
-        ),
-        vol.Required(
-            CONF_SCREENSAVER_TIMEOUT,
-            default=DEFAULT_SCREENSAVER_TIMEOUT,
-        ): NumberSelector(
-            NumberSelectorConfig(
-                min=5,
-                max=3600,
-                step=5,
-                mode=NumberSelectorMode.BOX,
-                unit_of_measurement="s",
-            ),
-        ),
-    }
-)
-
-
-def _entity_friendly_name_or_id(hass: HomeAssistant, entity_id: str) -> str:
-    """Best-effort default name for a light: friendly_name then entity_id tail."""
-    state = hass.states.get(entity_id)
-    if state is not None:
-        name = state.attributes.get("friendly_name")
-        if isinstance(name, str) and name:
-            return name
-    return entity_id.split(".", 1)[-1].replace("_", " ").title()
+_SCREENSAVER_TYPES = ["analog_clock", "digital_clock", "cover_art", "off"]
 
 
 def _ha_mqtt_available(hass: HomeAssistant) -> bool:
@@ -98,34 +62,36 @@ def _ha_mqtt_available(hass: HomeAssistant) -> bool:
     return bool(hass.config_entries.async_entries("mqtt"))
 
 
+def _friendly_name_or_id(hass: HomeAssistant, entity_id: str) -> str:
+    state = hass.states.get(entity_id)
+    if state is not None:
+        name = state.attributes.get("friendly_name")
+        if isinstance(name, str) and name:
+            return name
+    return entity_id.split(".", 1)[-1].replace("_", " ").title() if entity_id else ""
+
+
+# ---------------------------------------------------------------------------
+# Initial config flow — onboarding only.
+# ---------------------------------------------------------------------------
+
+
 class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Nubly."""
+    """Handle the initial onboarding flow for a Nubly device."""
 
     VERSION = 2
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        """Return the options flow for editing an existing entry."""
         return NublyOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         self._discovered: list[str] = []
         self._device_id: str | None = None
         self._discovery_fields: dict = {}
-        self._configure_input: dict | None = None
 
-    async def async_step_zeroconf(
-        self, discovery_info: ZeroconfServiceInfo
-    ):
-        """Handle a device announced via mDNS/zeroconf."""
-        _LOGGER.debug(
-            "NUBLY HA: async_step_zeroconf called name=%s type=%s host=%s port=%s",
-            getattr(discovery_info, "name", None),
-            getattr(discovery_info, "type", None),
-            discovery_info.host,
-            discovery_info.port,
-        )
+    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo):
         if not _ha_mqtt_available(self.hass):
             return self.async_abort(reason="mqtt_not_configured")
 
@@ -142,9 +108,6 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
         if not device_id:
             return self.async_abort(reason="missing_device_id")
 
-        _LOGGER.info("NUBLY HA: zeroconf discovered device_id = %s", device_id)
-        _LOGGER.debug("NUBLY HA: discovery host = %s:%s", host, port)
-
         await self.async_set_unique_id(device_id)
         self._abort_if_unique_id_configured(
             updates={CONF_HOST: host, CONF_PORT: port}
@@ -159,11 +122,9 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_MODEL: props.get("model"),
         }
         self.context["title_placeholders"] = {"name": device_id}
-
-        return await self.async_step_configure()
+        return await self.async_step_onboard()
 
     async def async_step_user(self, user_input=None):
-        """Manual entry point: fall back to MQTT discovery."""
         if not _ha_mqtt_available(self.hass):
             return self.async_abort(reason="mqtt_not_configured")
 
@@ -175,11 +136,10 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
         return await self.async_step_manual()
 
     async def async_step_pick_device(self, user_input=None):
-        """Let the user pick an MQTT-discovered device."""
         if user_input is not None:
             self._device_id = user_input[CONF_DEVICE_ID]
             self._discovery_fields = {CONF_DEVICE_ID: self._device_id}
-            return await self.async_step_configure()
+            return await self.async_step_onboard()
 
         schema = vol.Schema(
             {
@@ -194,17 +154,20 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="pick_device", data_schema=schema)
 
     async def async_step_manual(self, user_input=None):
-        """Fallback: manual device_id entry."""
         if user_input is not None:
             self._device_id = user_input[CONF_DEVICE_ID]
             self._discovery_fields = {CONF_DEVICE_ID: self._device_id}
-            return await self.async_step_configure()
+            return await self.async_step_onboard()
 
         schema = vol.Schema({vol.Required(CONF_DEVICE_ID): str})
         return self.async_show_form(step_id="manual", data_schema=schema)
 
-    async def async_step_configure(self, user_input=None):
-        """Collect room, entities, weather and screensaver timeout."""
+    async def async_step_onboard(self, user_input=None):
+        """Minimal onboarding: confirm device + capture a room name.
+
+        Detailed configuration (lights/media/weather/scenes) is done in
+        the options flow after the entry is created.
+        """
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -221,57 +184,40 @@ class NublyConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = error_key
 
             if not errors:
-                self._configure_input = user_input
-                if user_input.get(CONF_ADDITIONAL_LIGHT_ENTITIES):
-                    return await self.async_step_light_names()
-                return self._finalize_entry({})
+                room_name = (user_input.get("room_name") or "").strip()
 
+                # Seed a structured config with the chosen room name; the
+                # options flow fills in the rest.
+                structured = empty_structured()
+                structured["room"]["name"] = room_name or self._device_id
+                structured["room"]["id"] = (
+                    slugify(room_name) or (self._device_id or "")
+                )
+
+                title = room_name or self._device_id
+                _LOGGER.info(
+                    "NUBLY HA: config entry created device_id=%s schema_version=%d",
+                    self._device_id,
+                    CONFIG_SCHEMA_VERSION,
+                )
+                return self.async_create_entry(
+                    title=title,
+                    data=self._discovery_fields,
+                    options={CONF_CONFIG: structured},
+                )
+
+        schema = vol.Schema({vol.Required("room_name", default=""): str})
         return self.async_show_form(
-            step_id="configure",
-            data_schema=CONFIGURE_SCHEMA,
+            step_id="onboard",
+            data_schema=schema,
             description_placeholders={"device_id": self._device_id or ""},
             errors=errors,
         )
 
-    async def async_step_light_names(self, user_input=None):
-        """Per-light optional friendly names for additional lights."""
-        assert self._configure_input is not None
-        extras: list[str] = list(
-            self._configure_input.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []
-        )
 
-        if user_input is not None:
-            names = {
-                eid: (user_input.get(eid) or "").strip()
-                for eid in extras
-                if (user_input.get(eid) or "").strip()
-            }
-            return self._finalize_entry({CONF_LIGHT_NAMES: names})
-
-        schema_dict: dict = {}
-        for eid in extras:
-            default = _entity_friendly_name_or_id(self.hass, eid)
-            schema_dict[vol.Optional(eid, default=default)] = str
-
-        return self.async_show_form(
-            step_id="light_names",
-            data_schema=vol.Schema(schema_dict),
-            description_placeholders={"device_id": self._device_id or ""},
-        )
-
-    def _finalize_entry(self, extra_data: dict):
-        assert self._configure_input is not None
-        data = {
-            **self._discovery_fields,
-            **self._configure_input,
-            **extra_data,
-        }
-        title = self._configure_input.get(CONF_ROOM_NAME) or self._device_id
-        _LOGGER.info(
-            "NUBLY HA: config entry created for device_id = %s",
-            self._device_id,
-        )
-        return self.async_create_entry(title=title, data=data)
+# ---------------------------------------------------------------------------
+# Options flow — structured, menu-driven, one section per step.
+# ---------------------------------------------------------------------------
 
 
 class NublyOptionsFlow(OptionsFlow):
@@ -283,123 +229,383 @@ class NublyOptionsFlow(OptionsFlow):
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
-        self._init_input: dict | None = None
+
+    # Snapshot the current structured config at each entry into a step so
+    # sub-steps see the latest persisted state.
+    def _current(self) -> dict:
+        structured, _ = ensure_structured(
+            dict(self._config_entry.data), dict(self._config_entry.options)
+        )
+        return structured
+
+    def _save(self, structured: dict):
+        merged_options = {**self._config_entry.options, CONF_CONFIG: structured}
+        _LOGGER.info(
+            "NUBLY HA: options saved schema_version=%d device_id=%s",
+            structured.get("schema_version", CONFIG_SCHEMA_VERSION),
+            self._config_entry.data.get(CONF_DEVICE_ID),
+        )
+        return self.async_create_entry(title="", data=merged_options)
+
+    def _board(self) -> str | None:
+        return normalize_board(self._config_entry.data.get(CONF_MODEL))
 
     async def async_step_init(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow init menu entered")
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=[
+                "general",
+                "lights",
+                "media",
+                "weather",
+                "screensaver",
+                "scenes",
+            ],
+        )
+
+    # ---- General (room name) ----
+
+    async def async_step_general(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=general entered")
+        current = self._current()
         if user_input is not None:
-            cleaned = {k: v for k, v in user_input.items() if v is not None}
-            extras = cleaned.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []
-            if extras:
-                self._init_input = cleaned
-                return await self.async_step_light_names()
-            cleaned[CONF_LIGHT_NAMES] = {}
-            return self.async_create_entry(title="", data=cleaned)
-
-        current = {**self._config_entry.data, **self._config_entry.options}
-
-        schema_dict: dict = {
-            vol.Required(
-                CONF_ROOM_NAME,
-                default=current.get(CONF_ROOM_NAME, ""),
-            ): str,
-            vol.Required(
-                CONF_MEDIA_ENTITY,
-                default=current.get(CONF_MEDIA_ENTITY),
-            ): EntitySelector(
-                EntitySelectorConfig(domain="media_player"),
-            ),
-            vol.Required(
-                CONF_LIGHT_ENTITY,
-                default=current.get(CONF_LIGHT_ENTITY),
-            ): EntitySelector(
-                EntitySelectorConfig(domain="light"),
-            ),
-            vol.Required(
-                CONF_LIGHT_DISPLAY_NAME,
-                default=current.get(CONF_LIGHT_DISPLAY_NAME, ""),
-            ): str,
-            vol.Optional(
-                CONF_ADDITIONAL_LIGHT_ENTITIES,
-                default=current.get(CONF_ADDITIONAL_LIGHT_ENTITIES, []) or [],
-            ): EntitySelector(
-                EntitySelectorConfig(domain="light", multiple=True),
-            ),
-            vol.Required(
-                CONF_SCREENSAVER_TIMEOUT,
-                default=current.get(
-                    CONF_SCREENSAVER_TIMEOUT, DEFAULT_SCREENSAVER_TIMEOUT
-                ),
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
-                    step=5,
-                    mode=NumberSelectorMode.BOX,
-                    unit_of_measurement="s",
-                ),
-            ),
-        }
-
-        weather_default = current.get(CONF_WEATHER_ENTITY)
-        weather_key = (
-            vol.Optional(CONF_WEATHER_ENTITY, default=weather_default)
-            if weather_default
-            else vol.Optional(CONF_WEATHER_ENTITY)
-        )
-        schema_dict[weather_key] = EntitySelector(
-            EntitySelectorConfig(domain="weather"),
-        )
-
-        for conf_key, device_class in (
-            (CONF_TEMPERATURE_ENTITY, "temperature"),
-            (CONF_HUMIDITY_ENTITY, "humidity"),
-        ):
-            existing = current.get(conf_key)
-            key = (
-                vol.Optional(conf_key, default=existing)
-                if existing
-                else vol.Optional(conf_key)
+            room_name = (user_input.get("room_name") or "").strip()
+            updated = replace_section(
+                current,
+                "room",
+                {
+                    "id": slugify(room_name) or current["room"].get("id", ""),
+                    "name": room_name,
+                },
             )
-            schema_dict[key] = EntitySelector(
-                EntitySelectorConfig(
-                    domain="sensor", device_class=device_class
-                ),
-            )
+            return self._save(updated)
 
         return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(schema_dict),
+            step_id="general",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "room_name", default=current["room"].get("name", "")
+                    ): str,
+                }
+            ),
         )
 
-    async def async_step_light_names(self, user_input=None):
-        """Per-light optional names for additional lights (options flow)."""
-        assert self._init_input is not None
-        extras: list[str] = list(
-            self._init_input.get(CONF_ADDITIONAL_LIGHT_ENTITIES) or []
-        )
-        existing_names: dict = (
-            self._config_entry.options.get(CONF_LIGHT_NAMES)
-            or self._config_entry.data.get(CONF_LIGHT_NAMES)
-            or {}
-        )
+    # ---- Lights ----
+
+    async def async_step_lights(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=lights entered")
+        current = self._current()
+        existing = (
+            (current.get("screens") or {}).get("lights") or {}
+        ).get("entities") or []
 
         if user_input is not None:
-            names = {
-                eid: (user_input.get(eid) or "").strip()
-                for eid in extras
-                if (user_input.get(eid) or "").strip()
+            selected = user_input.get("light_entities") or []
+            # Drop dropped lights, keep label/icon for kept ones; we'll
+            # collect names + icons in a follow-up step.
+            existing_by_id = {
+                e["entity_id"]: e for e in existing if isinstance(e, dict)
             }
-            data = {**self._init_input, CONF_LIGHT_NAMES: names}
-            return self.async_create_entry(title="", data=data)
+            self._lights_draft = [
+                {
+                    "entity_id": eid,
+                    "label": (existing_by_id.get(eid) or {}).get("label", ""),
+                    "icon": (existing_by_id.get(eid) or {}).get("icon", ""),
+                }
+                for eid in selected
+            ]
+            if self._lights_draft:
+                return await self.async_step_lights_detail()
+            updated = replace_section(
+                current, "screens.lights", {"entities": []}
+            )
+            return self._save(updated)
+
+        default_selection = [
+            e["entity_id"] for e in existing if isinstance(e, dict)
+        ]
+        return self.async_show_form(
+            step_id="lights",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "light_entities", default=default_selection
+                    ): EntitySelector(
+                        EntitySelectorConfig(domain="light", multiple=True),
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_lights_detail(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=lights_detail entered")
+        current = self._current()
+        drafts: list[dict] = getattr(self, "_lights_draft", [])
+
+        if user_input is not None:
+            entities = []
+            for i, draft in enumerate(drafts, start=1):
+                eid = draft["entity_id"]
+                label = (user_input.get(f"light_{i}_label") or "").strip()
+                icon = (user_input.get(f"light_{i}_icon") or "").strip()
+                entities.append(
+                    {
+                        "entity_id": eid,
+                        "label": label or _friendly_name_or_id(self.hass, eid),
+                        "icon": icon,
+                    }
+                )
+            updated = replace_section(
+                current, "screens.lights", {"entities": entities}
+            )
+            return self._save(updated)
 
         schema_dict: dict = {}
-        for eid in extras:
-            default = existing_names.get(eid) or _entity_friendly_name_or_id(
-                self.hass, eid
+        for i, draft in enumerate(drafts, start=1):
+            eid = draft["entity_id"]
+            label_default = draft["label"] or _friendly_name_or_id(self.hass, eid)
+            schema_dict[
+                vol.Optional(f"light_{i}_label", default=label_default)
+            ] = str
+            schema_dict[
+                vol.Optional(f"light_{i}_icon", default=draft.get("icon", ""))
+            ] = IconSelector()
+        return self.async_show_form(
+            step_id="lights_detail",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={
+                "entities": ", ".join(d["entity_id"] for d in drafts)
+            },
+        )
+
+    # ---- Media ----
+
+    async def async_step_media(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=media entered")
+        current = self._current()
+        media_cur = (current.get("screens") or {}).get("media") or {}
+
+        if user_input is not None:
+            entity_id = (user_input.get("entity_id") or "").strip()
+            label = (user_input.get("label") or "").strip()
+            value = (
+                {"entity_id": entity_id, "label": label or entity_id}
+                if entity_id
+                else {}
             )
-            schema_dict[vol.Optional(eid, default=default)] = str
+            updated = replace_section(current, "screens.media", value)
+            return self._save(updated)
+
+        schema_dict: dict = {}
+        default_entity = media_cur.get("entity_id")
+        entity_key = (
+            vol.Optional("entity_id", default=default_entity)
+            if default_entity
+            else vol.Optional("entity_id")
+        )
+        schema_dict[entity_key] = EntitySelector(
+            EntitySelectorConfig(domain="media_player"),
+        )
+        schema_dict[
+            vol.Optional("label", default=media_cur.get("label", ""))
+        ] = str
+        return self.async_show_form(
+            step_id="media", data_schema=vol.Schema(schema_dict)
+        )
+
+    # ---- Weather (+ ambient sensors) ----
+
+    async def async_step_weather(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=weather entered")
+        current = self._current()
+        weather_cur = (current.get("screens") or {}).get("weather") or {}
+        ambient_cur = (current.get("screens") or {}).get("ambient") or {}
+
+        if user_input is not None:
+            weather_value = (
+                {"entity_id": user_input["weather_entity"]}
+                if user_input.get("weather_entity")
+                else {}
+            )
+            ambient_value: dict = {}
+            if user_input.get("temperature_entity"):
+                ambient_value["temperature_entity"] = user_input["temperature_entity"]
+            if user_input.get("humidity_entity"):
+                ambient_value["humidity_entity"] = user_input["humidity_entity"]
+
+            updated = replace_section(current, "screens.weather", weather_value)
+            updated = replace_section(updated, "screens.ambient", ambient_value)
+            return self._save(updated)
+
+        schema_dict: dict = {}
+        for key, domain, dc, default in (
+            ("weather_entity", "weather", None, weather_cur.get("entity_id")),
+            ("temperature_entity", "sensor", "temperature", ambient_cur.get("temperature_entity")),
+            ("humidity_entity", "sensor", "humidity", ambient_cur.get("humidity_entity")),
+        ):
+            field = (
+                vol.Optional(key, default=default)
+                if default
+                else vol.Optional(key)
+            )
+            cfg = (
+                EntitySelectorConfig(domain=domain, device_class=dc)
+                if dc
+                else EntitySelectorConfig(domain=domain)
+            )
+            schema_dict[field] = EntitySelector(cfg)
 
         return self.async_show_form(
-            step_id="light_names",
-            data_schema=vol.Schema(schema_dict),
+            step_id="weather", data_schema=vol.Schema(schema_dict)
         )
+
+    # ---- Screensaver ----
+
+    async def async_step_screensaver(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=screensaver entered")
+        current = self._current()
+        ss_cur = current.get("screensaver") or {}
+
+        if user_input is not None:
+            updated = replace_section(
+                current,
+                "screensaver",
+                {
+                    "enabled": bool(user_input.get("enabled", True)),
+                    "type": user_input.get("type") or "analog_clock",
+                    "timeout_seconds": int(
+                        user_input.get("timeout_seconds")
+                        or DEFAULT_SCREENSAVER_TIMEOUT
+                    ),
+                },
+            )
+            return self._save(updated)
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "enabled", default=bool(ss_cur.get("enabled", True))
+                ): BooleanSelector(),
+                vol.Required(
+                    "type", default=ss_cur.get("type") or "analog_clock"
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=_SCREENSAVER_TYPES,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    ),
+                ),
+                vol.Required(
+                    "timeout_seconds",
+                    default=int(
+                        ss_cur.get("timeout_seconds")
+                        or DEFAULT_SCREENSAVER_TIMEOUT
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=5,
+                        max=3600,
+                        step=5,
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement="s",
+                    ),
+                ),
+            }
+        )
+        return self.async_show_form(step_id="screensaver", data_schema=schema)
+
+    # ---- Scene buttons ----
+
+    async def async_step_scenes(self, user_input=None):
+        _LOGGER.debug("NUBLY HA: options flow step=scenes entered")
+        current = self._current()
+        existing = current.get("scene_buttons") or []
+        board = self._board()
+        count = scene_button_count(board)
+
+        if user_input is not None:
+            scenes, errors = _scenes_from_form(self.hass, user_input, count)
+            if errors:
+                return self.async_show_form(
+                    step_id="scenes",
+                    data_schema=_scenes_schema(self.hass, count, scenes),
+                    errors=errors,
+                    description_placeholders={"count": str(count)},
+                )
+            updated = replace_section(current, "scene_buttons", scenes)
+            return self._save(updated)
+
+        return self.async_show_form(
+            step_id="scenes",
+            data_schema=_scenes_schema(self.hass, count, existing),
+            description_placeholders={"count": str(count)},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Scene-button helpers
+# ---------------------------------------------------------------------------
+
+
+def _scenes_schema(hass: HomeAssistant, count: int, existing: list) -> vol.Schema:
+    existing_by_index: dict[int, dict] = {}
+    if isinstance(existing, list):
+        for i, item in enumerate(existing):
+            if isinstance(item, dict):
+                existing_by_index[i] = item
+
+    schema_dict: dict = {}
+    for i in range(count):
+        prev = existing_by_index.get(i, {})
+        n = i + 1
+        schema_dict[vol.Optional(f"scene_{n}_label", default=prev.get("label", ""))] = str
+
+        entity_default = prev.get("target_entity") or prev.get("entity_id")
+        entity_field = (
+            vol.Optional(f"scene_{n}_entity", default=entity_default)
+            if entity_default
+            else vol.Optional(f"scene_{n}_entity")
+        )
+        schema_dict[entity_field] = EntitySelector(
+            EntitySelectorConfig(domain=list(_SCENE_TARGET_DOMAINS)),
+        )
+        schema_dict[vol.Optional(f"scene_{n}_icon", default=prev.get("icon", ""))] = IconSelector()
+        schema_dict[
+            vol.Optional(f"scene_{n}_enabled", default=bool(prev.get("enabled", True)))
+        ] = BooleanSelector()
+    return vol.Schema(schema_dict)
+
+
+def _scenes_from_form(
+    hass: HomeAssistant, user_input: dict, count: int
+) -> tuple[list[dict], dict[str, str]]:
+    scenes: list[dict] = []
+    errors: dict[str, str] = {}
+    for i in range(count):
+        n = i + 1
+        entity_id = (user_input.get(f"scene_{n}_entity") or "").strip()
+        label = (user_input.get(f"scene_{n}_label") or "").strip()
+        icon = (user_input.get(f"scene_{n}_icon") or "").strip()
+        enabled = bool(user_input.get(f"scene_{n}_enabled", True))
+
+        if not entity_id and not label:
+            continue
+        if entity_id and hass.states.get(entity_id) is None:
+            errors[f"scene_{n}_entity"] = "entity_not_found"
+            continue
+        scenes.append(
+            {
+                "id": f"scene_{n}",
+                "label": label
+                or (
+                    hass.states.get(entity_id).attributes.get("friendly_name")
+                    if entity_id and hass.states.get(entity_id)
+                    else entity_id
+                ),
+                "target_entity": entity_id,
+                "icon": icon,
+                "enabled": enabled,
+            }
+        )
+    return scenes, errors
