@@ -11,7 +11,7 @@
   "requirements": [
     "Pillow"
   ],
-  "version": "0.8.0",
+  "version": "0.8.1",
   "zeroconf": [
     {
       "type": "_nubly._tcp.local."
