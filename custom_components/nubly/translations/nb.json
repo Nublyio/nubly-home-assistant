@@ -46,6 +46,7 @@
           "media": "Media",
           "weather": "Vær og romsensorer",
           "screensaver": "Skjermsparer",
+          "screen_order": "Skjermrekkefølge",
           "scenes": "Sceneknapper"
         }
       },
@@ -93,6 +94,13 @@
           "timeout_seconds": "Inaktivitetstid (sekunder)"
         }
       },
+      "screen_order": {
+        "title": "Skjermrekkefølge",
+        "description": "Velg hvilke skjermer som er aktive og i hvilken rekkefølge sveipingen skal vise dem. Valgrekkefølgen er sveiperekkefølgen.",
+        "data": {
+          "order": "Aktive skjermer (i rekkefølge)"
+        }
+      },
       "scenes": {
         "title": "Sceneknapper",
         "description": "Konfigurer opptil {count} sceneknapper. Hver rad binder én knapp til en Home Assistant-scene eller -script."
@@ -109,6 +117,15 @@
         "digital_clock": "Digital klokke",
         "cover_art": "Albumcover",
         "off": "Av"
+      }
+    },
+    "screen_id": {
+      "options": {
+        "media": "Media",
+        "light": "Lys",
+        "weather": "Vær",
+        "clock": "Klokke",
+        "settings": "Innstillinger"
       }
     }
   }

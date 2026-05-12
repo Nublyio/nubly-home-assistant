@@ -71,6 +71,8 @@ def empty_structured() -> dict:
             "media": {},
             "weather": {},
             "ambient": {},
+            # Empty means "let the device use its built-in default order".
+            "order": [],
         },
         "screensaver": {
             "enabled": True,

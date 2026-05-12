@@ -58,6 +58,17 @@ _SCREENSAVER_TYPES = ["analog_clock", "digital_clock", "cover_art", "off"]
 # Translation key used to localize the screensaver type dropdown.
 _SCREENSAVER_TYPE_TRANSLATION_KEY = "screensaver_type"
 
+# Canonical list of screen ids the device knows how to render. The user
+# chooses which to enable and in which order; unknown ids are dropped at
+# publish time so a typo can't brick the swipe order.
+SUPPORTED_SCREEN_IDS: tuple[str, ...] = (
+    "media",
+    "light",
+    "weather",
+    "clock",
+    "settings",
+)
+
 
 def _ha_mqtt_available(hass: HomeAssistant) -> bool:
     """Return True if HA's MQTT integration has an active config entry."""
@@ -262,6 +273,7 @@ class NublyOptionsFlow(OptionsFlow):
                 "media",
                 "weather",
                 "screensaver",
+                "screen_order",
                 "scenes",
             ],
         )
@@ -520,6 +532,47 @@ class NublyOptionsFlow(OptionsFlow):
         )
         return self.async_show_form(step_id="screensaver", data_schema=schema)
 
+    # ---- Screen order ----
+
+    async def async_step_screen_order(self, user_input=None):
+        """Order and toggle the swipeable screens on the device."""
+        _LOGGER.debug("NUBLY HA: options flow step=screen_order entered")
+        current = self._current()
+        screens_cur = current.get("screens") or {}
+        existing_order = screens_cur.get("order") or []
+
+        if user_input is not None:
+            order = _sanitize_screen_order(user_input.get("order") or [])
+            _LOGGER.info(
+                "NUBLY HA: screen order saved device=%s order=%s",
+                self._config_entry.data.get(CONF_DEVICE_ID),
+                order,
+            )
+            new_screens = {**screens_cur, "order": order}
+            updated = replace_section(current, "screens", new_screens)
+            return self._save(updated)
+
+        default = (
+            _sanitize_screen_order(existing_order)
+            if existing_order
+            else list(SUPPORTED_SCREEN_IDS)
+        )
+        return self.async_show_form(
+            step_id="screen_order",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("order", default=default): SelectSelector(
+                        SelectSelectorConfig(
+                            options=list(SUPPORTED_SCREEN_IDS),
+                            multiple=True,
+                            mode=SelectSelectorMode.DROPDOWN,
+                            translation_key="screen_id",
+                        ),
+                    ),
+                }
+            ),
+        )
+
     # ---- Scene buttons ----
 
     async def async_step_scenes(self, user_input=None):
@@ -557,6 +610,22 @@ class NublyOptionsFlow(OptionsFlow):
 # ---------------------------------------------------------------------------
 # Scene-button helpers
 # ---------------------------------------------------------------------------
+
+
+def _sanitize_screen_order(raw) -> list[str]:
+    """Drop unknown ids and de-duplicate while preserving order."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        sid = item.strip().lower()
+        if sid in SUPPORTED_SCREEN_IDS and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
 
 
 def _scenes_schema(hass: HomeAssistant, count: int, existing: list) -> vol.Schema:

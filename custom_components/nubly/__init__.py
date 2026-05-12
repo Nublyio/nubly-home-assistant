@@ -416,6 +416,18 @@ async def _publish_config(
             if v
         }
 
+    # Optional screen order — emitted only when configured so devices with
+    # no preference fall back to their built-in default order.
+    raw_order = screens.get("order") or []
+    screen_order: list[str] = []
+    seen_ids: set[str] = set()
+    for sid in raw_order:
+        if isinstance(sid, str):
+            normalized = sid.strip().lower()
+            if normalized and normalized not in seen_ids:
+                seen_ids.add(normalized)
+                screen_order.append(normalized)
+
     timeout = int(
         screensaver.get("timeout_seconds")
         or DEFAULT_SCREENSAVER_TIMEOUT
@@ -438,11 +450,17 @@ async def _publish_config(
         "screensaver_timeout": timeout,
     }
 
+    if screen_order:
+        # Emit at room.screens.order (spec) and top-level screens.order so
+        # any probe path the firmware uses finds the same value.
+        room["screens"] = {"order": screen_order}
+        payload["screens"] = {"order": screen_order}
+
     topic = f"nubly/devices/{device_id}/config"
     _LOGGER.info(
         "NUBLY HA: publishing runtime config device=%s topic=%s "
         "schema_version=%s screensaver_type=%s screensaver_enabled=%s "
-        "screensaver_timeout=%s scene_buttons=%d",
+        "screensaver_timeout=%s scene_buttons=%d screen_order=%s",
         device_id,
         topic,
         payload.get("schema_version"),
@@ -450,6 +468,7 @@ async def _publish_config(
         payload["screensaver"]["enabled"],
         payload["screensaver"]["timeout_seconds"],
         len(room.get("scenes") or []),
+        screen_order or "<default>",
     )
     _LOGGER.debug("NUBLY HA: config payload = %s", payload)
 

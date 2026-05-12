@@ -46,6 +46,7 @@
           "media": "Media",
           "weather": "Weather & ambient sensors",
           "screensaver": "Screensaver",
+          "screen_order": "Screen order",
           "scenes": "Scene buttons"
         }
       },
@@ -93,6 +94,13 @@
           "timeout_seconds": "Idle timeout (seconds)"
         }
       },
+      "screen_order": {
+        "title": "Screen order",
+        "description": "Pick which screens are enabled and in what swipe order. Selection order is the swipe order.",
+        "data": {
+          "order": "Enabled screens (in order)"
+        }
+      },
       "scenes": {
         "title": "Scene buttons",
         "description": "Configure up to {count} scene buttons. Each row binds one button to a Home Assistant scene or script."
@@ -109,6 +117,15 @@
         "digital_clock": "Digital clock",
         "cover_art": "Cover art",
         "off": "Off"
+      }
+    },
+    "screen_id": {
+      "options": {
+        "media": "Media",
+        "light": "Light",
+        "weather": "Weather",
+        "clock": "Clock",
+        "settings": "Settings"
       }
     }
   }
