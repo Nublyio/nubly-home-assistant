@@ -403,12 +403,15 @@ async def _publish_config(
             room["media"]["label"] = media["label"]
 
         if media.get("favorites_enabled"):
-            favorites = await _resolve_media_favorites(hass, device_id, media)
+            favorites, children_map = await _resolve_media_favorites(
+                hass, device_id, media
+            )
             if favorites:
                 room["media"]["favorites"] = favorites
-            # Cache the allow-list so the play_favorite command handler can
-            # validate synchronously on the MQTT receive path.
-            _stash_favorite_ids(hass, device_id, favorites)
+            # Cache favorites + pre-traversed category children so the
+            # browse / play_favorite handlers can resolve children
+            # synchronously without a second live browse on demand.
+            _stash_favorites_cache(hass, device_id, favorites, children_map)
 
     weather = screens.get("weather") or {}
     if weather.get("entity_id"):
@@ -538,27 +541,40 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][flag_key] = True
 
 
-def _stash_favorite_ids(
-    hass: HomeAssistant, device_id: str, favorites: list[dict]
+def _stash_favorites_cache(
+    hass: HomeAssistant,
+    device_id: str,
+    favorites: list[dict],
+    children_map: dict[str, list[dict]],
 ) -> None:
-    """Cache the published favorite content_ids per device for fast lookup."""
-    ids = {
+    """Cache the published favorites + pre-traversed category children.
+
+    Stored on the per-entry bucket so the MQTT command handlers can look
+    up children synchronously without re-issuing a live browse.
+    """
+    ids: set[str] = {
         f["media_content_id"]
         for f in favorites
         if isinstance(f, dict) and f.get("media_content_id")
     }
+    for children in children_map.values():
+        for child in children:
+            if isinstance(child, dict) and child.get("media_content_id"):
+                ids.add(child["media_content_id"])
+
     for bucket in (hass.data.get(DOMAIN) or {}).values():
         if not isinstance(bucket, dict):
             continue
         cfg = bucket.get("config") or {}
         if cfg.get(CONF_DEVICE_ID) == device_id:
             bucket["favorite_ids"] = ids
+            bucket["favorite_children_map"] = dict(children_map)
             return
 
 
 async def _resolve_media_favorites(
     hass: HomeAssistant, device_id: str, media_cfg: dict
-) -> list[dict]:
+) -> tuple[list[dict], dict[str, list[dict]]]:
     """Auto-discover favorites for the configured media_player.
 
     Detection order:
@@ -574,7 +590,7 @@ async def _resolve_media_favorites(
     """
     entity_id = (media_cfg.get("entity_id") or "").strip()
     if not entity_id:
-        return []
+        return [], {}
 
     max_count = int(media_cfg.get("favorites_max") or 12)
 
@@ -585,7 +601,7 @@ async def _resolve_media_favorites(
             entity_id,
             device_id,
         )
-        return []
+        return [], {}
 
     _LOGGER.debug(
         "NUBLY HA: favorites Sonos detected for entity=%s device=%s — "
@@ -594,26 +610,31 @@ async def _resolve_media_favorites(
         device_id,
     )
 
-    favorites = await _favorites_via_browser(hass, entity_id, max_count)
+    favorites, children_map = await _favorites_via_browser(
+        hass, entity_id, max_count
+    )
     source = "media_browser"
     if not favorites:
         favorites = _favorites_via_sensor(hass, max_count)
+        children_map = {}
         source = "sensor.sonos_favorites"
 
     _LOGGER.info(
         "NUBLY HA: media favorites discovered device=%s entity=%s source=%s "
-        "count=%d max=%d",
+        "count=%d max=%d categories_with_children=%d",
         device_id,
         entity_id,
         source if favorites else "<none>",
         len(favorites),
         max_count,
+        sum(1 for v in children_map.values() if v),
     )
     _LOGGER.debug(
-        "NUBLY HA: media favorites entries=%s",
+        "NUBLY HA: media favorites entries=%s children_map_keys=%s",
         [{"id": f["id"], "title": f["title"]} for f in favorites],
+        list(children_map.keys()),
     )
-    return favorites
+    return favorites, children_map
 
 
 def _is_sonos_entity(hass: HomeAssistant, entity_id: str) -> bool:
@@ -633,16 +654,23 @@ def _is_sonos_entity(hass: HomeAssistant, entity_id: str) -> bool:
 
 async def _favorites_via_browser(
     hass: HomeAssistant, entity_id: str, max_count: int
-) -> list[dict]:
-    """Enumerate Sonos favorites via the entity's media_browser tree."""
+) -> tuple[list[dict], dict[str, list[dict]]]:
+    """Enumerate Sonos favorites and pre-traverse expandable categories.
+
+    Returns (top_level_favorites, children_map). `children_map` is keyed
+    by an expandable parent's `media_content_id` and holds the normalized
+    runtime entries for each of that parent's children, so the
+    `media/browse` command handler can serve them synchronously without
+    a second live browse round-trip.
+    """
     component = hass.data.get("media_player")
     if component is None:
         _LOGGER.debug("NUBLY HA: favorites browser — media_player component unavailable")
-        return []
+        return [], {}
     player = component.get_entity(entity_id)
     if player is None:
         _LOGGER.debug("NUBLY HA: favorites browser — entity %s not registered", entity_id)
-        return []
+        return [], {}
 
     try:
         root = await player.async_browse_media()
@@ -652,7 +680,7 @@ async def _favorites_via_browser(
             entity_id,
             err,
         )
-        return []
+        return [], {}
 
     favorites_node = None
     for child in (getattr(root, "children", None) or []):
@@ -666,7 +694,7 @@ async def _favorites_via_browser(
             "NUBLY HA: favorites browser — no Favorites child in root for %s",
             entity_id,
         )
-        return []
+        return [], {}
 
     try:
         contents = await player.async_browse_media(
@@ -679,12 +707,13 @@ async def _favorites_via_browser(
             entity_id,
             err,
         )
-        return []
+        return [], {}
 
     out: list[dict] = []
     seen_ids: set[str] = set()
-    for child in (getattr(contents, "children", None) or []):
-        entry = _browse_child_to_runtime(child)
+    expandable_children = list(getattr(contents, "children", None) or [])
+    for raw_child in expandable_children:
+        entry = _browse_child_to_runtime(raw_child)
         if entry is None:
             continue
         if entry["media_content_id"] in seen_ids:
@@ -694,7 +723,80 @@ async def _favorites_via_browser(
         out.append(entry)
         if len(out) >= max_count:
             break
-    return out
+
+    # Pre-traverse expandable top-level entries so the device can render
+    # nested content (Albums/Playlists/Radio/Tracks) without a live
+    # browse round-trip from the MQTT command handler.
+    children_map: dict[str, list[dict]] = {}
+    # Map index back to raw browse children so we have the original node.
+    for fav in out:
+        raw = next(
+            (
+                c
+                for c in expandable_children
+                if getattr(c, "media_content_id", None) == fav["media_content_id"]
+            ),
+            None,
+        )
+        if raw is None or not fav.get("expandable"):
+            continue
+        await _populate_children_for(player, raw, fav, children_map, entity_id)
+
+    return out, children_map
+
+
+async def _populate_children_for(
+    player,
+    parent_node,
+    parent_runtime: dict,
+    children_map: dict[str, list[dict]],
+    entity_id: str,
+) -> None:
+    """Browse the children of one expandable parent and store them in the map."""
+    parent_id = parent_runtime["media_content_id"]
+    try:
+        sub = await player.async_browse_media(
+            getattr(parent_node, "media_content_type", None),
+            parent_id,
+        )
+    except Exception as err:
+        _LOGGER.info(
+            "NUBLY HA: favorites pre-traverse failed parent=%s title=%r: %s",
+            parent_id,
+            parent_runtime.get("title"),
+            err,
+        )
+        children_map[parent_id] = []
+        return
+
+    children: list[dict] = []
+    for idx, raw_child in enumerate(
+        getattr(sub, "children", None) or [], start=1
+    ):
+        ent = _browse_child_to_runtime(raw_child)
+        if ent is None:
+            continue
+        ent["id"] = f"item_{idx}"
+        children.append(ent)
+
+    children_map[parent_id] = children
+    # Also index by title to make label-based lookups (e.g. the device
+    # sending "Playlists" instead of the real content_id) trivially work.
+    title = (parent_runtime.get("title") or "").strip()
+    if title and title not in children_map:
+        children_map[title] = children
+    title_lc = title.lower()
+    if title_lc and title_lc != title and title_lc not in children_map:
+        children_map[title_lc] = children
+
+    _LOGGER.info(
+        "NUBLY HA: favorites pre-traverse parent=%s title=%r children=%d "
+        "entity=%s",
+        parent_id,
+        title,
+        len(children),
+        entity_id,
+    )
 
 
 def _browse_child_to_runtime(child) -> dict | None:

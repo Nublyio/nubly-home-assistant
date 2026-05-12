@@ -413,9 +413,41 @@ async def _handle_media_browse(
         )
         return
 
-    items, source_tag, error_reason = await _browse_children(
-        player, device_id, media_content_type, media_content_id
-    )
+    # Strategy 0: serve from the pre-traversed cache populated at publish
+    # time. This is the most reliable path — Sonos browse can fail
+    # intermittently or return empty for nested category nodes, while
+    # the cached map was built from a known-good publish-time browse.
+    items: list[dict] = []
+    source_tag = "none"
+    error_reason: str | None = None
+    cache_map: dict = (
+        bucket_ref.get("favorite_children_map") if bucket_ref else None
+    ) or {}
+    cache_key = _match_cache_key(cache_map, media_content_id)
+    if cache_key is not None:
+        items = list(cache_map.get(cache_key) or [])
+        if items:
+            _LOGGER.info(
+                "NUBLY HA: media browse cache hit device=%s content_id=%s "
+                "matched_key=%r children=%d",
+                device_id,
+                media_content_id,
+                cache_key,
+                len(items),
+            )
+            source_tag = "cache"
+        else:
+            _LOGGER.debug(
+                "NUBLY HA: media browse cache key=%r exists but empty for "
+                "device=%s — falling through to live browse",
+                cache_key,
+                device_id,
+            )
+
+    if not items:
+        items, source_tag, error_reason = await _browse_children(
+            player, device_id, media_content_type, media_content_id
+        )
 
     new_ids: set[str] = {it["media_content_id"] for it in items}
 
@@ -451,6 +483,26 @@ async def _handle_media_browse(
         items,
         error=error_reason if not items else None,
     )
+
+
+def _match_cache_key(cache_map: dict, requested: str) -> str | None:
+    """Resolve a browse-cache key from the requested media_content_id.
+
+    Tries: exact, lowercase, case-insensitive prefix/substring on any key.
+    Returns the actual cache key if matched, else None.
+    """
+    if not requested or not cache_map:
+        return None
+    if requested in cache_map:
+        return requested
+    needle = requested.strip().lower()
+    if needle in cache_map:
+        return needle
+    for key in cache_map.keys():
+        kl = key.strip().lower()
+        if kl == needle or kl in needle or needle in kl:
+            return key
+    return None
 
 
 async def _browse_children(
