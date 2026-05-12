@@ -58,6 +58,46 @@ BOARD_ROUND_1_43 = "round_1_43"
 BOARD_LCD_5 = "lcd_5_1024x600"
 SUPPORTED_BOARDS: frozenset[str] = frozenset({BOARD_ROUND_1_43, BOARD_LCD_5})
 
+# Per-board rendering capabilities. The cover-art proxy reads these to
+# decide an output size for each device class. Add new boards here when
+# adding hardware; do not hardcode sizes in view code.
+BOARD_CAPABILITIES: dict[str, dict[str, int]] = {
+    BOARD_LCD_5: {
+        "cover_art_max_width": 1024,
+        "cover_art_max_height": 600,
+    },
+    BOARD_ROUND_1_43: {
+        "cover_art_max_width": 466,
+        "cover_art_max_height": 466,
+    },
+}
+
+# Conservative fallback when a device's board cannot be determined.
+DEFAULT_COVER_ART_BOUNDS: dict[str, int] = {
+    "cover_art_max_width": 480,
+    "cover_art_max_height": 480,
+}
+
+
+def cover_art_bounds(board: str | None) -> tuple[int, int, bool]:
+    """Return (max_width, max_height, is_default) for a board id.
+
+    The third element is True when the bounds are the conservative fallback,
+    so callers can emit a warning at the right severity.
+    """
+    if board and board in BOARD_CAPABILITIES:
+        caps = BOARD_CAPABILITIES[board]
+        return (
+            int(caps["cover_art_max_width"]),
+            int(caps["cover_art_max_height"]),
+            False,
+        )
+    return (
+        DEFAULT_COVER_ART_BOUNDS["cover_art_max_width"],
+        DEFAULT_COVER_ART_BOUNDS["cover_art_max_height"],
+        True,
+    )
+
 
 @dataclass(frozen=True)
 class FirmwareInfo:
