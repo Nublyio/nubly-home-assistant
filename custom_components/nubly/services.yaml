@@ -1,0 +1,13 @@
+publish_config:
+  name: Publish runtime config
+  description: >
+    Republish the retained Nubly runtime config to MQTT for one device, or
+    for all configured Nubly devices when no device_id is given.
+  fields:
+    device_id:
+      name: Device ID
+      description: Hardware device_id (e.g. nubly_f82726d9b4dc). Leave empty to apply to all.
+      required: false
+      example: nubly_f82726d9b4dc
+      selector:
+        text:

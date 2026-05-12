@@ -40,7 +40,48 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
     _register_cover_art_view(hass)
     await _async_check_provisioning_once(hass)
+    _register_services(hass)
     return True
+
+
+def _register_services(hass: HomeAssistant) -> None:
+    """Register integration-level services.
+
+    nubly.publish_config — manually republish the retained runtime config.
+    Optional `device_id` filter; otherwise applies to every configured
+    Nubly device.
+    """
+    flag_key = "_services_registered"
+    if hass.data[DOMAIN].get(flag_key):
+        return
+
+    async def _service_publish_config(call) -> None:
+        target = (call.data.get("device_id") or "").strip()
+        published = 0
+        for entry_id, bucket in list(hass.data[DOMAIN].items()):
+            if not isinstance(bucket, dict):
+                continue
+            structured = bucket.get("structured")
+            cfg = bucket.get("config") or {}
+            device_id = cfg.get(CONF_DEVICE_ID)
+            if not device_id or not isinstance(structured, dict):
+                continue
+            if target and target != device_id:
+                continue
+            _LOGGER.info(
+                "NUBLY HA: nubly.publish_config service called device=%s",
+                device_id,
+            )
+            await _publish_config(hass, device_id, structured)
+            published += 1
+        if target and published == 0:
+            _LOGGER.warning(
+                "NUBLY HA: nubly.publish_config target device_id=%s not found",
+                target,
+            )
+
+    hass.services.async_register(DOMAIN, "publish_config", _service_publish_config)
+    hass.data[DOMAIN][flag_key] = True
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -142,6 +183,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    # Republish the retained runtime config whenever the device transitions
+    # offline → online. This handles device reboots, Wi-Fi blips, and any
+    # case where the retained message was cleared before the device
+    # subscribed.
+    online_state = {"last": bool(device_data.available)}
+
+    def _on_device_state_change() -> None:
+        was_online = online_state["last"]
+        now_online = bool(device_data.available)
+        if now_online != was_online:
+            online_state["last"] = now_online
+            if now_online:
+                _LOGGER.info(
+                    "NUBLY HA: device came online device_id=%s — republishing runtime config",
+                    device_data.device_id,
+                )
+                bucket = hass.data[DOMAIN].get(entry.entry_id)
+                latest = (
+                    bucket.get("structured")
+                    if isinstance(bucket, dict)
+                    else None
+                )
+                if isinstance(latest, dict):
+                    hass.async_create_task(
+                        _publish_config(hass, device_data.device_id, latest)
+                    )
+
+    entry.async_on_unload(device_data.add_listener(_on_device_state_change))
 
     device_id = data[CONF_DEVICE_ID]
     dev_reg = dr.async_get(hass)
@@ -311,11 +381,15 @@ async def _publish_config(
             }
         )
 
+    scene_buttons = _scene_buttons_payload(structured.get("scene_buttons"))
     room: dict = {
         "id": room_id,
         "name": room_name,
         "lights": lights,
-        "scenes": _scene_buttons_payload(structured.get("scene_buttons")),
+        # `scene_buttons` is the canonical path the firmware probes for.
+        # `scenes` is kept as an alias for older firmware revisions.
+        "scene_buttons": scene_buttons,
+        "scenes": scene_buttons,
     }
 
     media = screens.get("media") or {}
@@ -352,6 +426,8 @@ async def _publish_config(
         "mode": "room_controller",
         "device_id": device_id,
         "room": room,
+        # Top-level alias so devices that probe at the root still find it.
+        "scene_buttons": scene_buttons,
         "screensaver": {
             "enabled": bool(screensaver.get("enabled", True)),
             "type": screensaver.get("type") or "analog_clock",
@@ -437,15 +513,15 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
 def _scene_buttons_payload(stored) -> list[dict]:
     """Translate structured scene_buttons into the runtime MQTT shape.
 
-    Drops disabled or entity-less entries. Preserves order.
+    Preserves order. Disabled entries are kept in the array with
+    enabled=false so the device can grey out the slot rather than
+    silently shrinking the layout. Entity-less entries are dropped.
     """
     if not isinstance(stored, list):
         return []
     out: list[dict] = []
     for entry in stored:
         if not isinstance(entry, dict):
-            continue
-        if not entry.get("enabled", True):
             continue
         target = (
             entry.get("target_entity") or entry.get("entity_id") or ""
@@ -454,12 +530,11 @@ def _scene_buttons_payload(stored) -> list[dict]:
             continue
         scene: dict = {
             "id": entry.get("id") or f"scene_{len(out) + 1}",
-            "entity_id": target,
             "label": entry.get("label") or target,
+            "icon": (entry.get("icon") or "").strip(),
+            "target_entity": target,
+            "enabled": bool(entry.get("enabled", True)),
         }
-        icon = (entry.get("icon") or "").strip()
-        if icon:
-            scene["icon"] = icon
         out.append(scene)
     _LOGGER.debug(
         "NUBLY HA: scene_buttons payload built count=%d entries=%s",
