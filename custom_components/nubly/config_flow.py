@@ -404,10 +404,40 @@ class NublyOptionsFlow(OptionsFlow):
         if user_input is not None:
             entity_id = (user_input.get("entity_id") or "").strip()
             label = (user_input.get("label") or "").strip()
-            value = (
-                {"entity_id": entity_id, "label": label or entity_id}
-                if entity_id
-                else {}
+            favorites_enabled = bool(user_input.get("favorites_enabled", False))
+            favorites_source = (
+                user_input.get("favorites_source") or ""
+            ).strip()
+            favorites_max = int(user_input.get("favorites_max") or 12)
+            favorites_include = user_input.get("favorites_include") or []
+            if not isinstance(favorites_include, list):
+                favorites_include = []
+
+            value: dict = {}
+            if entity_id:
+                value = {
+                    "entity_id": entity_id,
+                    "label": label or entity_id,
+                }
+                if favorites_enabled:
+                    value["favorites_enabled"] = True
+                    if favorites_source:
+                        value["favorites_source"] = favorites_source
+                    value["favorites_max"] = max(1, min(50, favorites_max))
+                    if favorites_include:
+                        value["favorites_include"] = [
+                            str(x) for x in favorites_include if x
+                        ]
+
+            _LOGGER.info(
+                "NUBLY HA: media config saved device=%s entity=%s "
+                "favorites_enabled=%s source=%s max=%s include_count=%d",
+                self._config_entry.data.get(CONF_DEVICE_ID),
+                entity_id or "<none>",
+                favorites_enabled,
+                favorites_source or "<auto>",
+                favorites_max,
+                len(favorites_include),
             )
             updated = replace_section(current, "screens.media", value)
             return self._save(updated)
@@ -425,6 +455,60 @@ class NublyOptionsFlow(OptionsFlow):
         schema_dict[
             vol.Optional("label", default=media_cur.get("label", ""))
         ] = str
+        schema_dict[
+            vol.Optional(
+                "favorites_enabled",
+                default=bool(media_cur.get("favorites_enabled", False)),
+            )
+        ] = BooleanSelector()
+
+        # Auto-pick the canonical Sonos favorites sensor when present, so
+        # the user doesn't have to know its entity_id.
+        default_source = media_cur.get("favorites_source") or (
+            "sensor.sonos_favorites"
+            if self.hass.states.get("sensor.sonos_favorites") is not None
+            else None
+        )
+        source_key = (
+            vol.Optional("favorites_source", default=default_source)
+            if default_source
+            else vol.Optional("favorites_source")
+        )
+        schema_dict[source_key] = EntitySelector(
+            EntitySelectorConfig(domain="sensor"),
+        )
+        schema_dict[
+            vol.Optional(
+                "favorites_max",
+                default=int(media_cur.get("favorites_max") or 12),
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=1, max=50, step=1, mode=NumberSelectorMode.BOX
+            ),
+        )
+
+        # Build the include multi-select from the current favorites sensor
+        # so users can pick a subset by title. If the sensor has no items
+        # yet, the field is rendered without options (still saves fine).
+        include_options = _sonos_favorite_titles(self.hass, default_source)
+        if include_options:
+            schema_dict[
+                vol.Optional(
+                    "favorites_include",
+                    default=[
+                        t for t in (media_cur.get("favorites_include") or [])
+                        if t in include_options
+                    ],
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=include_options,
+                    multiple=True,
+                    mode=SelectSelectorMode.DROPDOWN,
+                ),
+            )
+
         return self.async_show_form(
             step_id="media", data_schema=vol.Schema(schema_dict)
         )
@@ -610,6 +694,24 @@ class NublyOptionsFlow(OptionsFlow):
 # ---------------------------------------------------------------------------
 # Scene-button helpers
 # ---------------------------------------------------------------------------
+
+
+def _sonos_favorite_titles(hass: HomeAssistant, sensor_entity: str | None) -> list[str]:
+    """Return current favorite titles from a Sonos favorites sensor, or []."""
+    if not sensor_entity:
+        return []
+    state = hass.states.get(sensor_entity)
+    if state is None:
+        return []
+    items = state.attributes.get("items") or []
+    titles: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("name")
+                if isinstance(title, str) and title:
+                    titles.append(title)
+    return titles
 
 
 def _sanitize_screen_order(raw) -> list[str]:

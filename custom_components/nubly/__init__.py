@@ -401,6 +401,11 @@ async def _publish_config(
         if media.get("label"):
             room["media"]["label"] = media["label"]
 
+        if media.get("favorites_enabled"):
+            favorites = _resolve_media_favorites(hass, device_id, media)
+            if favorites:
+                room["media"]["favorites"] = favorites
+
     weather = screens.get("weather") or {}
     if weather.get("entity_id"):
         room["weather"] = {"entity_id": weather["entity_id"]}
@@ -527,6 +532,91 @@ async def _async_check_provisioning_once(hass: HomeAssistant) -> None:
         return
     await async_check_provisioning_support(hass)
     hass.data[DOMAIN][flag_key] = True
+
+
+def _resolve_media_favorites(
+    hass: HomeAssistant, device_id: str, media_cfg: dict
+) -> list[dict]:
+    """Resolve a stored media-favorites config into the runtime payload list.
+
+    Source of truth is a Sonos favorites sensor (default sensor.sonos_favorites)
+    whose `items` attribute carries `{title, item_id, ...}` entries.
+    The include-filter (if set) limits the published list to titles the
+    user selected in the options flow.
+    """
+    source_entity = (media_cfg.get("favorites_source") or "sensor.sonos_favorites").strip()
+    state = hass.states.get(source_entity)
+    if state is None:
+        _LOGGER.debug(
+            "NUBLY HA: favorites source %s not found for device=%s",
+            source_entity,
+            device_id,
+        )
+        return []
+
+    items = state.attributes.get("items") or []
+    if not isinstance(items, list):
+        return []
+
+    include = media_cfg.get("favorites_include") or []
+    include_set: set[str] = {
+        x for x in include if isinstance(x, str) and x
+    }
+    max_count = int(media_cfg.get("favorites_max") or 12)
+
+    discovered: list[dict] = []
+    runtime: list[dict] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name")
+        content_id = (
+            item.get("item_id") or item.get("id") or item.get("media_content_id")
+        )
+        if not title or not content_id:
+            continue
+        discovered.append({"title": title, "id": content_id})
+
+        if include_set and title not in include_set:
+            continue
+        if content_id in seen_ids:
+            continue
+        seen_ids.add(content_id)
+
+        entry: dict = {
+            "id": f"fav_{len(runtime) + 1}",
+            "title": title,
+            "media_content_id": content_id,
+            "media_content_type": item.get("media_content_type")
+            or "favorite_item_id",
+        }
+        icon = item.get("thumbnail") or item.get("icon")
+        if icon:
+            entry["icon"] = icon
+        source = item.get("source") or item.get("provider")
+        if source:
+            entry["source"] = source
+        runtime.append(entry)
+
+        if len(runtime) >= max_count:
+            break
+
+    _LOGGER.info(
+        "NUBLY HA: media favorites resolved device=%s source=%s "
+        "discovered=%d included=%d (max=%d)",
+        device_id,
+        source_entity,
+        len(discovered),
+        len(runtime),
+        max_count,
+    )
+    _LOGGER.debug(
+        "NUBLY HA: media favorites discovered=%s included=%s",
+        discovered,
+        runtime,
+    )
+    return runtime
 
 
 def _scene_buttons_payload(stored) -> list[dict]:

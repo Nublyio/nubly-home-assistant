@@ -70,10 +70,19 @@
       },
       "media": {
         "title": "Media player",
-        "description": "Select the media_player to show on the media screen.",
+        "description": "Select the media_player to show on the media screen. Optionally enable favorites from a Sonos favorites sensor.",
         "data": {
           "entity_id": "Media player entity",
-          "label": "Display label"
+          "label": "Display label",
+          "favorites_enabled": "Enable favorites",
+          "favorites_source": "Favorites sensor",
+          "favorites_max": "Maximum favorites to show",
+          "favorites_include": "Favorites to expose (empty = all)"
+        },
+        "data_description": {
+          "favorites_source": "Defaults to sensor.sonos_favorites when present.",
+          "favorites_max": "Caps the runtime list size sent to the device.",
+          "favorites_include": "Pick a subset by title. Leave empty to expose every favorite up to the maximum."
         }
       },
       "weather": {

@@ -61,6 +61,12 @@ async def async_subscribe_commands(hass: HomeAssistant, device_id: str):
             _handle_scene_activate(hass, device_id, data)
             return
 
+        # Playing a Sonos favorite needs an allow-list check against the
+        # device's own published favorites before we issue the service call.
+        if command == "media/play_favorite":
+            _handle_play_favorite(hass, device_id, data)
+            return
+
         spec = _COMMAND_MAP.get(command)
         if spec is None:
             _LOGGER.debug("NUBLY HA: unknown command %s", command)
@@ -175,6 +181,159 @@ def _handle_scene_activate(
         _async_call_scene_service(
             hass, svc_domain, svc_name, target, button_id
         )
+    )
+
+
+@callback
+def _handle_play_favorite(
+    hass: HomeAssistant, device_id: str, data: dict
+) -> None:
+    """Dispatch a `commands/media/play_favorite` payload to media_player.play_media.
+
+    Validates that the requested favorite is in the published list for
+    this specific device before issuing the service call. This prevents
+    a rogue MQTT producer from triggering arbitrary `play_media` calls
+    against arbitrary entities.
+    """
+    from .const import CONF_DEVICE_ID, DOMAIN as NUBLY_DOMAIN
+
+    media_content_id = (data.get("media_content_id") or "").strip()
+    media_content_type = (
+        data.get("media_content_type") or "favorite_item_id"
+    ).strip()
+    requested_entity = (data.get("entity_id") or "").strip()
+    title = (data.get("title") or "").strip()
+
+    _LOGGER.info(
+        "NUBLY HA: play_favorite received device=%s entity=%s content_id=%s "
+        "content_type=%s title=%r",
+        device_id,
+        requested_entity or "<none>",
+        media_content_id or "<none>",
+        media_content_type,
+        title,
+    )
+
+    if not media_content_id:
+        _LOGGER.warning(
+            "NUBLY HA: play_favorite missing media_content_id device=%s",
+            device_id,
+        )
+        return
+
+    # Locate the device's structured config to validate the favorite.
+    structured: dict | None = None
+    for bucket in (hass.data.get(NUBLY_DOMAIN) or {}).values():
+        if not isinstance(bucket, dict):
+            continue
+        cfg = bucket.get("config") or {}
+        if cfg.get(CONF_DEVICE_ID) != device_id:
+            continue
+        candidate = bucket.get("structured")
+        if isinstance(candidate, dict):
+            structured = candidate
+            break
+
+    if structured is None:
+        _LOGGER.warning(
+            "NUBLY HA: play_favorite no structured config found device=%s",
+            device_id,
+        )
+        return
+
+    media_cfg = (structured.get("screens") or {}).get("media") or {}
+    configured_entity = (media_cfg.get("entity_id") or "").strip()
+    if not configured_entity:
+        _LOGGER.warning(
+            "NUBLY HA: play_favorite no media_player configured device=%s",
+            device_id,
+        )
+        return
+
+    # The device should target its own configured media_player. Anything
+    # else is treated as a programming error and rejected.
+    if requested_entity and requested_entity != configured_entity:
+        _LOGGER.warning(
+            "NUBLY HA: play_favorite entity mismatch device=%s requested=%s "
+            "configured=%s",
+            device_id,
+            requested_entity,
+            configured_entity,
+        )
+        return
+
+    # The favorite must be one we actually published to this device. We
+    # resolve the published list lazily by re-reading the favorites
+    # source so the user doesn't have to round-trip a save when their
+    # Sonos library changes.
+    favorites = _published_favorites_for_validation(hass, media_cfg)
+    allowed_ids = {f["media_content_id"] for f in favorites}
+    if media_content_id not in allowed_ids:
+        _LOGGER.warning(
+            "NUBLY HA: play_favorite media_content_id not in allow-list "
+            "device=%s content_id=%s allowed=%d",
+            device_id,
+            media_content_id,
+            len(allowed_ids),
+        )
+        return
+
+    _LOGGER.info(
+        "NUBLY HA: play_favorite calling media_player.play_media entity=%s "
+        "content_id=%s content_type=%s",
+        configured_entity,
+        media_content_id,
+        media_content_type,
+    )
+    hass.async_create_task(
+        _async_call_play_media(
+            hass,
+            configured_entity,
+            media_content_id,
+            media_content_type,
+        )
+    )
+
+
+def _published_favorites_for_validation(
+    hass: HomeAssistant, media_cfg: dict
+) -> list[dict]:
+    """Re-resolve the favorites list with the same logic as the publisher."""
+    # Local import to avoid an import cycle with __init__.py.
+    from . import _resolve_media_favorites  # type: ignore[attr-defined]
+
+    return _resolve_media_favorites(hass, "<validation>", media_cfg)
+
+
+async def _async_call_play_media(
+    hass: HomeAssistant,
+    entity_id: str,
+    media_content_id: str,
+    media_content_type: str,
+) -> None:
+    try:
+        await hass.services.async_call(
+            "media_player",
+            "play_media",
+            {
+                "entity_id": entity_id,
+                "media_content_id": media_content_id,
+                "media_content_type": media_content_type,
+            },
+            blocking=False,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "NUBLY HA: play_favorite media_player.play_media failed "
+            "entity=%s content_id=%s",
+            entity_id,
+            media_content_id,
+        )
+        return
+    _LOGGER.info(
+        "NUBLY HA: play_favorite ok entity=%s content_id=%s",
+        entity_id,
+        media_content_id,
     )
 
 
