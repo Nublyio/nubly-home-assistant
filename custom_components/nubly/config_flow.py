@@ -55,6 +55,8 @@ _LOGGER = logging.getLogger(__name__)
 _SCENE_TARGET_DOMAINS = ("scene", "script")
 
 _SCREENSAVER_TYPES = ["analog_clock", "digital_clock", "cover_art", "off"]
+# Translation key used to localize the screensaver type dropdown.
+_SCREENSAVER_TYPE_TRANSLATION_KEY = "screensaver_type"
 
 
 def _ha_mqtt_available(hass: HomeAssistant) -> bool:
@@ -469,18 +471,20 @@ class NublyOptionsFlow(OptionsFlow):
         ss_cur = current.get("screensaver") or {}
 
         if user_input is not None:
-            updated = replace_section(
-                current,
-                "screensaver",
-                {
-                    "enabled": bool(user_input.get("enabled", True)),
-                    "type": user_input.get("type") or "analog_clock",
-                    "timeout_seconds": int(
-                        user_input.get("timeout_seconds")
-                        or DEFAULT_SCREENSAVER_TIMEOUT
-                    ),
-                },
+            new_section = {
+                "enabled": bool(user_input.get("enabled", True)),
+                "type": user_input.get("type") or "analog_clock",
+                "timeout_seconds": int(
+                    user_input.get("timeout_seconds")
+                    or DEFAULT_SCREENSAVER_TIMEOUT
+                ),
+            }
+            _LOGGER.info(
+                "NUBLY HA: screensaver config saved device=%s %s",
+                self._config_entry.data.get(CONF_DEVICE_ID),
+                new_section,
             )
+            updated = replace_section(current, "screensaver", new_section)
             return self._save(updated)
 
         schema = vol.Schema(
@@ -494,6 +498,7 @@ class NublyOptionsFlow(OptionsFlow):
                     SelectSelectorConfig(
                         options=_SCREENSAVER_TYPES,
                         mode=SelectSelectorMode.DROPDOWN,
+                        translation_key=_SCREENSAVER_TYPE_TRANSLATION_KEY,
                     ),
                 ),
                 vol.Required(
@@ -533,6 +538,12 @@ class NublyOptionsFlow(OptionsFlow):
                     errors=errors,
                     description_placeholders={"count": str(count)},
                 )
+            _LOGGER.info(
+                "NUBLY HA: scene button config saved device=%s count=%d %s",
+                self._config_entry.data.get(CONF_DEVICE_ID),
+                len(scenes),
+                scenes,
+            )
             updated = replace_section(current, "scene_buttons", scenes)
             return self._save(updated)
 

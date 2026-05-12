@@ -363,7 +363,18 @@ async def _publish_config(
     }
 
     topic = f"nubly/devices/{device_id}/config"
-    _LOGGER.debug("NUBLY HA: publishing config to topic = %s", topic)
+    _LOGGER.info(
+        "NUBLY HA: publishing runtime config device=%s topic=%s "
+        "schema_version=%s screensaver_type=%s screensaver_enabled=%s "
+        "screensaver_timeout=%s scene_buttons=%d",
+        device_id,
+        topic,
+        payload.get("schema_version"),
+        payload["screensaver"]["type"],
+        payload["screensaver"]["enabled"],
+        payload["screensaver"]["timeout_seconds"],
+        len(room.get("scenes") or []),
+    )
     _LOGGER.debug("NUBLY HA: config payload = %s", payload)
 
     service_data = {

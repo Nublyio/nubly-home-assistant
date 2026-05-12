@@ -1,0 +1,115 @@
+{
+  "config": {
+    "abort": {
+      "mqtt_not_configured": "MQTT-integrasjonen kreves for Nubly.",
+      "missing_device_id": "Den oppdagede enheten manglet device_id.",
+      "already_configured": "Denne Nubly-enheten er allerede konfigurert."
+    },
+    "error": {
+      "supervisor_unavailable": "Home Assistant Supervisor er ikke tilgjengelig — automatisk Mosquitto-oppsett krever HAOS eller Supervised.",
+      "mosquitto_user_add_failed": "Kunne ikke legge til MQTT-brukeren i Mosquitto-tillegget. Sjekk Supervisor-loggene.",
+      "mosquitto_restart_failed": "Kunne ikke starte Mosquitto-tillegget på nytt. Sjekk Supervisor-loggene.",
+      "mqtt_reconnect_timeout": "MQTT koblet ikke til på nytt etter Mosquitto-omstart. Prøv igjen om litt.",
+      "mqtt_publish_not_ready": "MQTT er tilkoblet, men aksepterer ikke publiseringer ennå. Prøv igjen om litt.",
+      "provisioning_failed": "Kunne ikke klargjøre Nubly-enheten — sjekk at den er på nett og tilgjengelig."
+    },
+    "step": {
+      "pick_device": {
+        "title": "Velg Nubly-enhet",
+        "data": {
+          "device_id": "Enhet"
+        }
+      },
+      "manual": {
+        "title": "Skriv inn Nubly device-ID",
+        "data": {
+          "device_id": "Device-ID"
+        }
+      },
+      "onboard": {
+        "title": "Legg til Nubly-enhet",
+        "description": "Enhet {device_id}. Etter at den er lagt til, åpne integrasjonens Konfigurer-meny for å sette opp lys, media, scener og skjermsparer.",
+        "data": {
+          "room_name": "Romnavn"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nubly-innstillinger",
+        "description": "Velg hva du vil konfigurere.",
+        "menu_options": {
+          "general": "Generelt",
+          "lights": "Lys",
+          "media": "Media",
+          "weather": "Vær og romsensorer",
+          "screensaver": "Skjermsparer",
+          "scenes": "Sceneknapper"
+        }
+      },
+      "general": {
+        "title": "Generelt",
+        "description": "Sett romnavnet som vises på enheten.",
+        "data": {
+          "room_name": "Romnavn"
+        }
+      },
+      "lights": {
+        "title": "Lys",
+        "description": "Velg lysene som skal vises på denne enheten. Du gir dem navn og ikon på neste side.",
+        "data": {
+          "light_entities": "Lysenheter"
+        }
+      },
+      "lights_detail": {
+        "title": "Lysetiketter",
+        "description": "Sett visningsnavn og ikon for: {entities}"
+      },
+      "media": {
+        "title": "Mediaspiller",
+        "description": "Velg media_player som skal vises på mediaskjermen.",
+        "data": {
+          "entity_id": "Mediaspiller-entitet",
+          "label": "Visningsnavn"
+        }
+      },
+      "weather": {
+        "title": "Vær og romsensorer",
+        "description": "Valgfri værentitet og temperatur-/luftfuktighetssensorer.",
+        "data": {
+          "weather_entity": "Værentitet",
+          "temperature_entity": "Temperatursensor",
+          "humidity_entity": "Luftfuktighetssensor"
+        }
+      },
+      "screensaver": {
+        "title": "Skjermsparer",
+        "description": "Slå på skjermsparer, velg type og inaktivitetstid.",
+        "data": {
+          "enabled": "Skjermsparer på",
+          "type": "Skjermsparer-type",
+          "timeout_seconds": "Inaktivitetstid (sekunder)"
+        }
+      },
+      "scenes": {
+        "title": "Sceneknapper",
+        "description": "Konfigurer opptil {count} sceneknapper. Hver rad binder én knapp til en Home Assistant-scene eller -script."
+      }
+    },
+    "error": {
+      "entity_not_found": "Den valgte entiteten finnes ikke i Home Assistant."
+    }
+  },
+  "selector": {
+    "screensaver_type": {
+      "options": {
+        "analog_clock": "Analog klokke",
+        "digital_clock": "Digital klokke",
+        "cover_art": "Albumcover",
+        "off": "Av"
+      }
+    }
+  }
+}
