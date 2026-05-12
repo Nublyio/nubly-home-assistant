@@ -413,45 +413,18 @@ async def _handle_media_browse(
         )
         return
 
-    try:
-        node = await player.async_browse_media(
-            media_content_type, media_content_id
-        )
-    except Exception as err:
-        _LOGGER.warning(
-            "NUBLY HA: media browse raised device=%s content_id=%s: %s",
-            device_id,
-            media_content_id,
-            err,
-        )
-        await _publish_browse_response(
-            hass,
-            response_topic,
-            request_id,
-            media_content_id,
-            [],
-            error="browse_failed",
-        )
-        return
+    items, source_tag, error_reason = await _browse_children(
+        player, device_id, media_content_type, media_content_id
+    )
 
-    items: list[dict] = []
-    new_ids: set[str] = set()
-    for idx, child in enumerate(
-        getattr(node, "children", None) or [], start=1
-    ):
-        entry = _browse_child_to_runtime(child)
-        if entry is None:
-            continue
-        entry["id"] = f"item_{idx}"
-        items.append(entry)
-        new_ids.add(entry["media_content_id"])
+    new_ids: set[str] = {it["media_content_id"] for it in items}
 
     if not items:
-        _LOGGER.info(
-            "NUBLY HA: media browse empty device=%s content_id=%s "
-            "(category has no children or is not browsable)",
+        _LOGGER.warning(
+            "NUBLY HA: media browse empty device=%s content_id=%s reason=%s",
             device_id,
             media_content_id,
+            error_reason or "no_children",
         )
 
     # Extend the play_favorite allow-list with the newly seen content_ids
@@ -464,14 +437,165 @@ async def _handle_media_browse(
             bucket_ref["favorite_ids"] = set(existing) | new_ids
 
     _LOGGER.info(
-        "NUBLY HA: media browse response device=%s content_id=%s children=%d",
+        "NUBLY HA: media browse response device=%s content_id=%s children=%d source=%s",
         device_id,
         media_content_id,
         len(items),
+        source_tag,
     )
     await _publish_browse_response(
-        hass, response_topic, request_id, media_content_id, items
+        hass,
+        response_topic,
+        request_id,
+        media_content_id,
+        items,
+        error=error_reason if not items else None,
     )
+
+
+async def _browse_children(
+    player,
+    device_id: str,
+    media_content_type: str | None,
+    media_content_id: str,
+) -> tuple[list[dict], str, str | None]:
+    """Resolve children for a browse request, with fallbacks.
+
+    Strategy:
+      1. Direct browse via async_browse_media(type, id) — fastest path.
+      2. If the request returns no children, walk the player's root and
+         look for a child whose title matches the requested content_id
+         (case-insensitive contains), then browse into that node. This
+         covers cases where the device sends category labels like
+         "Playlists" that aren't real HA browse ids.
+
+    Returns (items, source_tag, error_reason).
+    """
+    from . import _browse_child_to_runtime  # type: ignore[attr-defined]
+
+    items: list[dict] = []
+    error_reason: str | None = None
+
+    # ----- Strategy 1: direct browse -----
+    try:
+        node = await player.async_browse_media(
+            media_content_type, media_content_id
+        )
+        items = _children_to_runtime(node, _browse_child_to_runtime)
+        if items:
+            _LOGGER.info(
+                "NUBLY HA: media browse direct hit device=%s content_id=%s "
+                "children=%d",
+                device_id,
+                media_content_id,
+                len(items),
+            )
+            return items, "direct", None
+        _LOGGER.debug(
+            "NUBLY HA: media browse direct returned no children device=%s "
+            "content_id=%s — trying title-match fallback",
+            device_id,
+            media_content_id,
+        )
+    except Exception as err:
+        _LOGGER.info(
+            "NUBLY HA: media browse direct raised device=%s content_id=%s "
+            "type=%s: %s — trying title-match fallback",
+            device_id,
+            media_content_id,
+            media_content_type,
+            err,
+        )
+        error_reason = "browse_failed"
+
+    # ----- Strategy 2: title-match against root -----
+    try:
+        root = await player.async_browse_media()
+    except Exception as err:
+        _LOGGER.warning(
+            "NUBLY HA: media browse root fetch failed device=%s: %s",
+            device_id,
+            err,
+        )
+        return items, "none", error_reason or "browse_root_failed"
+
+    root_children = list(getattr(root, "children", None) or [])
+    root_titles = [
+        (getattr(c, "title", "") or "") for c in root_children
+    ]
+    _LOGGER.debug(
+        "NUBLY HA: media browse root titles device=%s: %s",
+        device_id,
+        root_titles,
+    )
+
+    needle = media_content_id.strip().lower()
+    matched = None
+    for child in root_children:
+        title = (getattr(child, "title", "") or "").strip().lower()
+        cid = (getattr(child, "media_content_id", "") or "").strip().lower()
+        if not title and not cid:
+            continue
+        if (
+            title == needle
+            or cid == needle
+            or (needle and (needle in title or title in needle))
+        ):
+            matched = child
+            break
+
+    if matched is None:
+        _LOGGER.warning(
+            "NUBLY HA: media browse no title-match for %r in root titles=%s "
+            "device=%s",
+            media_content_id,
+            root_titles,
+            device_id,
+        )
+        return items, "none", error_reason or "category_not_found"
+
+    matched_title = getattr(matched, "title", "")
+    matched_id = getattr(matched, "media_content_id", "")
+    matched_type = getattr(matched, "media_content_type", None)
+    _LOGGER.info(
+        "NUBLY HA: media browse title-match device=%s requested=%r matched "
+        "title=%r content_id=%s type=%s",
+        device_id,
+        media_content_id,
+        matched_title,
+        matched_id,
+        matched_type,
+    )
+
+    try:
+        node = await player.async_browse_media(matched_type, matched_id)
+        items = _children_to_runtime(node, _browse_child_to_runtime)
+        if items:
+            return items, "title_match", None
+        return items, "title_match", "matched_node_empty"
+    except Exception as err:
+        _LOGGER.warning(
+            "NUBLY HA: media browse title-match browse raised device=%s "
+            "matched_id=%s: %s",
+            device_id,
+            matched_id,
+            err,
+        )
+        return items, "title_match", "matched_browse_failed"
+
+
+def _children_to_runtime(node, normalizer) -> list[dict]:
+    """Run a BrowseMedia node's children through the normalizer."""
+    out: list[dict] = []
+    for idx, child in enumerate(
+        getattr(node, "children", None) or [], start=1
+    ):
+        entry = normalizer(child)
+        if entry is None:
+            continue
+        entry["id"] = f"item_{idx}"
+        out.append(entry)
+    return out
 
 
 async def _publish_browse_response(
