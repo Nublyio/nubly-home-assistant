@@ -12,12 +12,15 @@ import hashlib
 import io
 import logging
 
+from urllib.parse import unquote, urlsplit
+
 from aiohttp import ClientError, web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import CONF_DEVICE_ID, CONF_MEDIA_ENTITY, CONF_MODEL, DOMAIN
 from .device_data import NublyDeviceData, get_attr
@@ -75,7 +78,7 @@ class NublyCoverArtView(HomeAssistantView):
 
         entry = _find_entry_by_device_id(self.hass, device_id)
         if entry is None and not query_pic:
-            return _err(404, "unknown device")
+            return _err(404, "unknown_device")
 
         # Resolve board for output sizing.
         board = self._resolve_board(entry, device_id)
@@ -135,47 +138,102 @@ class NublyCoverArtView(HomeAssistantView):
             )
             return web.Response(status=304, headers={"ETag": etag})
 
-        # Fetch raw upstream bytes.
-        try:
-            if query_pic:
-                image_bytes, upstream_ct, upstream_status = (
-                    await self._fetch_direct(query_pic)
-                )
-                _LOGGER.debug(
-                    "NUBLY HA: upstream url=%s status=%s content_type=%s bytes=%d",
+        # Resolve ?pic= upfront so we can log the decoded form even if the
+        # fetch later fails.
+        decoded_pic: str | None = None
+        resolved_pic_url: str | None = None
+        if query_pic:
+            try:
+                decoded_pic = unquote(query_pic)
+            except Exception:
+                _LOGGER.exception(
+                    "NUBLY HA: cover art pic URL-decode failed raw=%r",
                     query_pic,
-                    upstream_status,
-                    upstream_ct,
-                    len(image_bytes) if image_bytes else 0,
+                )
+                return _err(400, "bad_pic_query")
+            try:
+                resolved_pic_url = self._resolve_picture_url(decoded_pic)
+            except _CoverArtError as err:
+                _LOGGER.warning(
+                    "NUBLY HA: cover art pic URL invalid raw=%r decoded=%r reason=%s",
+                    query_pic,
+                    decoded_pic,
+                    err.message,
+                )
+                return _err(err.status, err.message)
+            _LOGGER.debug(
+                "NUBLY HA: cover art pic raw=%r decoded=%r resolved=%s",
+                query_pic,
+                decoded_pic,
+                resolved_pic_url,
+            )
+
+        # Fetch raw upstream bytes.
+        image_bytes: bytes | None = None
+        upstream_ct: str | None = None
+        upstream_status: int | None = None
+        try:
+            if resolved_pic_url:
+                image_bytes, upstream_ct, upstream_status = (
+                    await self._fetch_direct(resolved_pic_url)
                 )
             else:
                 if not media_entity:
-                    return _err(404, "no media entity configured")
+                    return _err(404, "no_media_entity")
                 image_bytes, upstream_ct = await self._fetch_via_player(
                     media_entity
                 )
-                _LOGGER.debug(
-                    "NUBLY HA: upstream picture url=%s content_type=%s bytes=%d",
-                    upstream_picture,
-                    upstream_ct,
-                    len(image_bytes) if image_bytes else 0,
-                )
         except _CoverArtError as err:
+            _LOGGER.warning(
+                "NUBLY HA: cover art fetch failed device=%s reason=%s detail=%s "
+                "pic_resolved=%s entity=%s",
+                device_id,
+                err.message,
+                getattr(err, "detail", None),
+                resolved_pic_url,
+                media_entity,
+            )
             return _err(err.status, err.message)
         except Exception:
-            _LOGGER.exception("NUBLY HA: cover art unexpected fetch error")
-            return _err(502, "fetch failed")
+            _LOGGER.exception(
+                "NUBLY HA: cover art unexpected fetch error device=%s "
+                "pic_resolved=%s entity=%s",
+                device_id,
+                resolved_pic_url,
+                media_entity,
+            )
+            return _err(502, "upstream_fetch_failed")
+
+        size = len(image_bytes) if image_bytes else 0
+        first8 = image_bytes[:8].hex() if image_bytes else ""
+        _LOGGER.debug(
+            "NUBLY HA: upstream device=%s url=%s status=%s content_type=%s "
+            "bytes=%d first8=%s",
+            device_id,
+            resolved_pic_url or upstream_picture,
+            upstream_status,
+            upstream_ct,
+            size,
+            first8,
+        )
 
         if not image_bytes:
-            return _err(404, "no image")
+            _LOGGER.warning(
+                "NUBLY HA: cover art empty upstream body device=%s url=%s",
+                device_id,
+                resolved_pic_url or upstream_picture,
+            )
+            return _err(502, "empty_upstream_body")
 
         # Detect/validate the source format. Content-Type is logged only,
         # never trusted. Pillow's open() is the real validator.
         detected = _detect_format(image_bytes)
         _LOGGER.debug(
-            "NUBLY HA: cover art detected_format=%s upstream_content_type=%s",
+            "NUBLY HA: cover art detected_format=%s upstream_content_type=%s "
+            "first8=%s",
             detected,
             upstream_ct,
+            first8,
         )
         if detected not in _SUPPORTED_FORMATS:
             _LOGGER.warning(
@@ -183,32 +241,40 @@ class NublyCoverArtView(HomeAssistantView):
                 "upstream_content_type=%s first8=%s",
                 detected,
                 upstream_ct,
-                image_bytes[:8].hex(),
+                first8,
             )
-            return _err(415, f"unsupported image format: {detected}")
+            return _err(415, "unsupported_format")
 
         try:
             jpeg_bytes, src_size, out_size = await self.hass.async_add_executor_job(
                 _normalize_to_jpeg, image_bytes, max_w, max_h
             )
+        except _PillowImportError as err:
+            _LOGGER.error("NUBLY HA: Pillow not available: %s", err)
+            return _err(500, "pillow_not_available")
         except _UnsupportedFormatError as err:
             _LOGGER.warning(
-                "NUBLY HA: Pillow refused the source image (%s)", err
+                "NUBLY HA: Pillow refused the source image (%s) first8=%s",
+                err,
+                first8,
             )
-            return _err(415, "unsupported image format")
+            return _err(415, "unsupported_format")
         except Exception:
             _LOGGER.exception(
-                "NUBLY HA: cover art decode/encode failed (source_bytes=%d)",
-                len(image_bytes),
+                "NUBLY HA: cover art decode/encode failed source_bytes=%d "
+                "detected=%s first8=%s",
+                size,
+                detected,
+                first8,
             )
-            return _err(500, "image conversion failed")
+            return _err(500, "image_conversion_failed")
 
         if not jpeg_bytes.startswith(_JPEG_MAGIC):
             _LOGGER.error(
                 "NUBLY HA: refusing to serve non-JPEG bytes (first4=%s)",
                 jpeg_bytes[:4].hex(),
             )
-            return _err(500, "image conversion produced non-JPEG output")
+            return _err(500, "image_conversion_failed")
 
         headers = {"Cache-Control": "no-cache, max-age=0"}
         if etag:
@@ -265,20 +331,52 @@ class NublyCoverArtView(HomeAssistantView):
     ) -> tuple[bytes, str | None]:
         component = self.hass.data.get("media_player")
         if component is None:
-            raise _CoverArtError(503, "media_player unavailable")
+            raise _CoverArtError(503, "media_player_unavailable")
         player = component.get_entity(media_entity)
         if player is None:
-            raise _CoverArtError(404, "entity not found")
+            raise _CoverArtError(404, "entity_not_found")
         try:
             image = await player.async_get_media_image()
-        except Exception:
+        except Exception as err:
             _LOGGER.exception(
                 "NUBLY HA: async_get_media_image raised for %s", media_entity
             )
-            raise _CoverArtError(502, "fetch failed")
+            wrapped = _CoverArtError(502, "upstream_fetch_failed")
+            wrapped.detail = str(err)  # type: ignore[attr-defined]
+            raise wrapped from err
         if not image or not image[0]:
-            raise _CoverArtError(404, "no image")
+            raise _CoverArtError(404, "no_image")
         return image[0], (image[1] or None)
+
+    def _resolve_picture_url(self, pic: str) -> str:
+        """Convert a possibly-relative entity_picture into an absolute URL.
+
+        Sonos and many other HA media_player integrations expose
+        entity_picture as an internal relative path like:
+            /api/media_player_proxy/media_player.x?token=...&cache=...
+        aiohttp.ClientSession.get() requires an absolute URL, so we
+        resolve relatives against HA's internal base URL. Signed-path
+        tokens in the query are preserved untouched.
+        """
+        if not pic or not isinstance(pic, str):
+            raise _CoverArtError(400, "bad_pic_query")
+        parts = urlsplit(pic)
+        if parts.scheme in ("http", "https") and parts.netloc:
+            return pic
+        if not pic.startswith("/"):
+            # Refuse anything that isn't an absolute http(s) URL or an
+            # absolute HA path. Relative paths without leading slash, or
+            # schemes like file://, are unsafe to follow.
+            raise _CoverArtError(400, "bad_pic_query")
+        try:
+            base = get_url(
+                self.hass, allow_internal=True, prefer_external=False
+            )
+        except NoURLAvailableError as err:
+            raise _CoverArtError(
+                500, "no_internal_url"
+            ) from err
+        return f"{base.rstrip('/')}{pic}"
 
     async def _fetch_direct(
         self, url: str
@@ -288,15 +386,32 @@ class NublyCoverArtView(HomeAssistantView):
             async with session.get(
                 url, timeout=_FETCH_TIMEOUT_SECONDS
             ) as resp:
-                if resp.status != 200:
-                    raise _CoverArtError(
-                        502, f"upstream HTTP {resp.status}"
-                    )
                 content_type = resp.headers.get("Content-Type")
+                status = resp.status
+                if status != 200:
+                    # Read a small slice of the body for logging context
+                    # but don't surface it to the device.
+                    try:
+                        snippet = (await resp.read())[:200]
+                    except Exception:
+                        snippet = b""
+                    _LOGGER.warning(
+                        "NUBLY HA: upstream non-200 status=%s url=%s "
+                        "content_type=%s body[:200]=%r",
+                        status,
+                        url,
+                        content_type,
+                        snippet,
+                    )
+                    err = _CoverArtError(502, "upstream_fetch_failed")
+                    err.detail = f"HTTP {status}"  # type: ignore[attr-defined]
+                    raise err
                 data = await resp.read()
-                return data, content_type, resp.status
+                return data, content_type, status
         except ClientError as err:
-            raise _CoverArtError(502, f"upstream error: {err}") from err
+            wrapped = _CoverArtError(502, "upstream_fetch_failed")
+            wrapped.detail = str(err)  # type: ignore[attr-defined]
+            raise wrapped from err
 
 
 class _CoverArtError(Exception):
@@ -307,6 +422,10 @@ class _CoverArtError(Exception):
 
 
 class _UnsupportedFormatError(Exception):
+    pass
+
+
+class _PillowImportError(Exception):
     pass
 
 
@@ -344,8 +463,8 @@ def _normalize_to_jpeg(
     # Local import: Pillow is declared in manifest.json `requirements`.
     try:
         from PIL import Image, UnidentifiedImageError
-    except ImportError as err:  # pragma: no cover — manifest installs it
-        raise RuntimeError(f"Pillow not available: {err}") from err
+    except ImportError as err:  # Pillow declared in manifest.json `requirements`
+        raise _PillowImportError(str(err)) from err
 
     try:
         img = Image.open(io.BytesIO(image_bytes))
