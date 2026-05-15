@@ -216,7 +216,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     data = dict(entry.data)
     device_id = data.get(CONF_DEVICE_ID, "<unknown>")
-    _LOGGER.info("NUBLY HA: integration setup started for device_id = %s", device_id)
+    raw_model = data.get(CONF_MODEL)
+    # Local import to avoid a cycle at module load.
+    from .firmware import normalize_board as _norm_board
+
+    normalized_board = _norm_board(raw_model) if isinstance(raw_model, str) else None
+    _LOGGER.info(
+        "NUBLY HA: integration setup started entry=%s device_id=%s "
+        "model=%s board=%s sw_version=%s",
+        entry.entry_id,
+        device_id,
+        raw_model,
+        normalized_board,
+        data.get(CONF_SW_VERSION),
+    )
 
     try:
         if data.get(CONF_DEVICE_ID) == LEGACY_DEVICE_ID:
@@ -335,7 +348,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _LOGGER.info(
-        "NUBLY HA: integration setup completed for device_id = %s", device_id
+        "NUBLY HA: integration setup completed device_id=%s board=%s "
+        "room=%r topic=nubly/devices/%s/config",
+        device_id,
+        normalized_board,
+        structured.get("room", {}).get("name"),
+        device_id,
     )
     return True
 
@@ -446,6 +464,17 @@ async def _publish_config(
     structured config and adds a top-level `schema_version` field so the
     device (and future firmware) can branch on shape changes.
     """
+    # Guard: refuse to publish into a malformed topic when the entry
+    # somehow lost its device_id. The previous fall-through would have
+    # produced `nubly/devices//config` and silently failed on the device.
+    if not isinstance(device_id, str) or not device_id.strip():
+        _LOGGER.error(
+            "NUBLY HA: refusing to publish runtime config — empty device_id "
+            "(structured.room=%r)",
+            structured.get("room"),
+        )
+        return
+
     room_meta = structured.get("room") or {}
     screens = structured.get("screens") or {}
     screensaver = structured.get("screensaver") or {}
@@ -557,18 +586,51 @@ async def _publish_config(
         payload["screens"] = {"order": screen_order}
 
     topic = f"nubly/devices/{device_id}/config"
+
+    # Resolve the device board for the diagnostic log. Looks at the
+    # per-entry bucket first (live model from attributes), then falls
+    # back to whatever was captured at config-entry creation.
+    board_for_log: str | None = None
+    try:
+        from .firmware import normalize_board as _norm
+
+        for bucket in (hass.data.get(DOMAIN) or {}).values():
+            if not isinstance(bucket, dict):
+                continue
+            cfg = bucket.get("config") or {}
+            if cfg.get(CONF_DEVICE_ID) != device_id:
+                continue
+            device_data_obj = bucket.get("device_data")
+            attrs = getattr(device_data_obj, "attributes", None) or {}
+            raw = (
+                attrs.get("board")
+                or attrs.get("device_type")
+                or attrs.get("model")
+                or cfg.get(CONF_MODEL)
+            )
+            if isinstance(raw, str):
+                board_for_log = _norm(raw)
+            break
+    except Exception:
+        _LOGGER.debug("NUBLY HA: board resolution for log failed", exc_info=True)
+
     _LOGGER.info(
-        "NUBLY HA: publishing runtime config device=%s topic=%s "
-        "schema_version=%s screensaver_type=%s screensaver_enabled=%s "
-        "screensaver_timeout=%s scene_buttons=%d screen_order=%s",
+        "NUBLY HA: publishing runtime config device=%s board=%s topic=%s "
+        "schema_version=%s mode=%s room=%r lights=%d scenes=%d "
+        "screen_order=%s screensaver_type=%s screensaver_enabled=%s "
+        "screensaver_timeout=%s retain=True",
         device_id,
+        board_for_log,
         topic,
         payload.get("schema_version"),
+        payload.get("mode"),
+        room.get("name"),
+        len(room.get("lights") or []),
+        len(room.get("scenes") or []),
+        screen_order or "<default>",
         payload["screensaver"]["type"],
         payload["screensaver"]["enabled"],
         payload["screensaver"]["timeout_seconds"],
-        len(room.get("scenes") or []),
-        screen_order or "<default>",
     )
     _LOGGER.debug("NUBLY HA: config payload = %s", payload)
 
