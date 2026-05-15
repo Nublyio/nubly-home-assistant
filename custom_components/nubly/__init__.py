@@ -82,7 +82,95 @@ def _register_services(hass: HomeAssistant) -> None:
             )
 
     hass.services.async_register(DOMAIN, "publish_config", _service_publish_config)
+
+    async def _service_debug_media_browser(call) -> None:
+        """Diagnostic: dump async_browse_media result for a media_player.
+
+        Temporary helper to figure out which media_content_id / type to use
+        when navigating Sonos favorites. Logs the root node summary and up
+        to the first 20 children with their full identifying fields.
+        """
+        entity_id = (call.data.get("entity_id") or "").strip()
+        content_id = call.data.get("media_content_id")
+        content_type = call.data.get("media_content_type")
+        if not entity_id:
+            _LOGGER.warning("NUBLY HA: debug_media_browser called without entity_id")
+            return
+
+        component = hass.data.get("media_player")
+        if component is None:
+            _LOGGER.warning(
+                "NUBLY HA: debug_media_browser — media_player component not loaded"
+            )
+            return
+        player = component.get_entity(entity_id)
+        if player is None:
+            _LOGGER.warning(
+                "NUBLY HA: debug_media_browser — entity %s not found", entity_id
+            )
+            return
+
+        _LOGGER.warning(
+            "NUBLY HA: debug_media_browser START entity=%s content_id=%s content_type=%s",
+            entity_id,
+            content_id,
+            content_type,
+        )
+        try:
+            node = await player.async_browse_media(content_type, content_id)
+        except Exception as err:
+            _LOGGER.warning(
+                "NUBLY HA: debug_media_browser raised entity=%s content_id=%s "
+                "content_type=%s err=%r",
+                entity_id,
+                content_id,
+                content_type,
+                err,
+            )
+            return
+
+        _dump_browse_node(entity_id, node)
+        _LOGGER.warning("NUBLY HA: debug_media_browser END entity=%s", entity_id)
+
+    hass.services.async_register(
+        DOMAIN, "debug_media_browser", _service_debug_media_browser
+    )
     hass.data[DOMAIN][flag_key] = True
+
+
+def _dump_browse_node(entity_id: str, node) -> None:
+    """Pretty-log a BrowseMedia node and its first 20 children."""
+    children = list(getattr(node, "children", None) or [])
+    _LOGGER.warning(
+        "NUBLY HA: debug node entity=%s title=%r media_class=%s "
+        "media_content_id=%s media_content_type=%s can_play=%s can_expand=%s "
+        "children_count=%d",
+        entity_id,
+        getattr(node, "title", None),
+        getattr(node, "media_class", None),
+        getattr(node, "media_content_id", None),
+        getattr(node, "media_content_type", None),
+        getattr(node, "can_play", None),
+        getattr(node, "can_expand", None),
+        len(children),
+    )
+    for idx, child in enumerate(children[:20], start=1):
+        _LOGGER.warning(
+            "NUBLY HA: debug   child %02d title=%r media_class=%s "
+            "media_content_id=%s media_content_type=%s can_play=%s can_expand=%s",
+            idx,
+            getattr(child, "title", None),
+            getattr(child, "media_class", None),
+            getattr(child, "media_content_id", None),
+            getattr(child, "media_content_type", None),
+            getattr(child, "can_play", None),
+            getattr(child, "can_expand", None),
+        )
+    if len(children) > 20:
+        _LOGGER.warning(
+            "NUBLY HA: debug   ... and %d more children (not shown)",
+            len(children) - 20,
+        )
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -728,7 +816,6 @@ async def _favorites_via_browser(
     # nested content (Albums/Playlists/Radio/Tracks) without a live
     # browse round-trip from the MQTT command handler.
     children_map: dict[str, list[dict]] = {}
-    # Map index back to raw browse children so we have the original node.
     for fav in out:
         raw = next(
             (
@@ -742,7 +829,162 @@ async def _favorites_via_browser(
             continue
         await _populate_children_for(player, raw, fav, children_map, entity_id)
 
+    # Fallback: any expandable category that came back empty from live
+    # browse — and there are many Sonos configurations where these
+    # nested browses return nothing — gets backfilled from the flat
+    # sensor.sonos_favorites list, grouped by detected media class.
+    empty_categories = [
+        fav
+        for fav in out
+        if fav.get("expandable")
+        and not (children_map.get(fav["media_content_id"]) or [])
+    ]
+    if empty_categories:
+        _LOGGER.info(
+            "NUBLY HA: %d category/categories returned no children via live "
+            "browse for entity=%s — backfilling from sensor.sonos_favorites",
+            len(empty_categories),
+            entity_id,
+        )
+        sensor_groups = _build_sensor_category_map(hass)
+        for fav in empty_categories:
+            title = fav.get("title") or ""
+            slug = _category_slug_for_title(title)
+            children = sensor_groups.get(slug) or []
+            if not children:
+                _LOGGER.warning(
+                    "NUBLY HA: category %r (slug=%s) still empty after sensor "
+                    "backfill (sensor groups: %s)",
+                    title,
+                    slug,
+                    {k: len(v) for k, v in sensor_groups.items()},
+                )
+                continue
+            children_map[fav["media_content_id"]] = children
+            if title:
+                children_map[title] = children
+                children_map[title.lower()] = children
+            _LOGGER.info(
+                "NUBLY HA: category backfilled title=%r slug=%s children=%d",
+                title,
+                slug,
+                len(children),
+            )
+
     return out, children_map
+
+
+_SONOS_CATEGORY_SLUGS = ("albums", "playlists", "radio", "tracks", "other")
+
+
+def _build_sensor_category_map(hass: HomeAssistant) -> dict[str, list[dict]]:
+    """Group flat sonos_favorites items by detected category.
+
+    Returns {"albums": [...], "playlists": [...], "radio": [...],
+             "tracks": [...], "other": [...]}, each list normalized to
+    runtime payload dicts ({title, media_content_id, media_content_type,
+    playable, expandable, icon?}).
+    """
+    state = hass.states.get("sensor.sonos_favorites")
+    if state is None:
+        _LOGGER.debug(
+            "NUBLY HA: sensor.sonos_favorites not present; cannot backfill"
+        )
+        return {slug: [] for slug in _SONOS_CATEGORY_SLUGS}
+
+    items = state.attributes.get("items") or []
+    groups: dict[str, list[dict]] = {slug: [] for slug in _SONOS_CATEGORY_SLUGS}
+    if not isinstance(items, list):
+        return groups
+
+    counters: dict[str, int] = {slug: 0 for slug in _SONOS_CATEGORY_SLUGS}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name")
+        content_id = (
+            item.get("item_id")
+            or item.get("id")
+            or item.get("media_content_id")
+        )
+        if not title or not content_id:
+            continue
+        slug = _categorize_sonos_favorite(item)
+        counters[slug] += 1
+        entry: dict = {
+            "id": f"item_{counters[slug]}",
+            "title": title,
+            "media_content_id": content_id,
+            "media_content_type": item.get("media_content_type")
+            or "favorite_item_id",
+            "playable": True,
+            "expandable": False,
+        }
+        icon = item.get("thumbnail") or item.get("icon")
+        if icon:
+            entry["icon"] = icon
+        groups[slug].append(entry)
+    return groups
+
+
+def _categorize_sonos_favorite(item: dict) -> str:
+    """Map a single Sonos favorite dict to one of _SONOS_CATEGORY_SLUGS.
+
+    Looks at every plausible field (type, media_class, content_type,
+    item_id prefix) and falls back to 'other'.
+    """
+    haystack = " ".join(
+        str(item.get(k) or "")
+        for k in (
+            "type",
+            "media_class",
+            "media_content_type",
+            "title",
+        )
+    ).lower()
+    item_id = str(
+        item.get("item_id")
+        or item.get("id")
+        or item.get("media_content_id")
+        or ""
+    )
+    item_id_upper = item_id.upper()
+
+    if "playlist" in haystack or item_id_upper.startswith("SQ:") or "PLAYLIST" in item_id_upper:
+        return "playlists"
+    if "album" in haystack or item_id_upper.startswith("A:ALBUM") or item_id_upper.startswith("AI:"):
+        return "albums"
+    if (
+        "radio" in haystack
+        or "station" in haystack
+        or item_id_upper.startswith("R:")
+        or "RADIO" in item_id_upper
+        or "TUNEIN" in item_id_upper
+    ):
+        return "radio"
+    if (
+        "track" in haystack
+        or "song" in haystack
+        or (item_id_upper.startswith("S:") and not item_id_upper.startswith("SQ:"))
+    ):
+        return "tracks"
+    return "other"
+
+
+def _category_slug_for_title(title: str) -> str:
+    """Map a category label (any language/case) to a canonical slug."""
+    t = (title or "").strip().lower()
+    if not t:
+        return "other"
+    if "playlist" in t or "spillel" in t:  # English + Norwegian
+        return "playlists"
+    if "album" in t:
+        return "albums"
+    if "radio" in t or "stasjon" in t:
+        return "radio"
+    if "track" in t or "song" in t or "spor" in t or "sang" in t:
+        return "tracks"
+    return "other"
 
 
 async def _populate_children_for(

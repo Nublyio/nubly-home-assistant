@@ -11,3 +11,35 @@ publish_config:
       example: nubly_f82726d9b4dc
       selector:
         text:
+
+debug_media_browser:
+  name: Debug media browser
+  description: >
+    Diagnostic helper. Calls media_player.async_browse_media for the given
+    entity and logs the resulting node + the first 20 children at WARNING
+    level so it shows up without enabling debug logs. Use this to find the
+    real media_content_id / media_content_type for nested categories like
+    Playlists. Does not modify any runtime config.
+  fields:
+    entity_id:
+      name: Media player entity
+      description: The media_player to query (typically a Sonos player).
+      required: true
+      example: media_player.stue_tak
+      selector:
+        entity:
+          domain: media_player
+    media_content_id:
+      name: media_content_id
+      description: Leave empty to browse the root. Provide a node id to browse into it.
+      required: false
+      example: FV:2
+      selector:
+        text:
+    media_content_type:
+      name: media_content_type
+      description: Optional content type that pairs with media_content_id.
+      required: false
+      example: favorites
+      selector:
+        text:
