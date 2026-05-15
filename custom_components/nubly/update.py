@@ -130,21 +130,46 @@ class NublyFirmwareUpdate(
         selected = info.version if info else None
 
         if board and not all_versions:
-            _LOGGER.warning(
-                "NUBLY HA: no firmware entries for board=%s (device=%s "
-                "name=%r). Manifest boards: %s",
-                board,
-                self._device_id,
-                self._device_name(),
-                sorted(((self.coordinator.data or {}).get("manifest") or {})
-                       .get("boards", {}).keys())
+            # Differentiate two cases:
+            #   * board not registered with the integration at all → WARNING
+            #   * board is registered but the manifest has no entry for it
+            #     yet (e.g. round_1_43 before a binary has been released) →
+            #     a single INFO per device per session, then silent.
+            manifest_boards = (
+                sorted(
+                    ((self.coordinator.data or {}).get("manifest") or {})
+                    .get("boards", {})
+                    .keys()
+                )
                 if isinstance(
                     ((self.coordinator.data or {}).get("manifest") or {})
                     .get("boards"),
                     dict,
                 )
-                else None,
+                else None
             )
+            if board in SUPPORTED_BOARDS:
+                if not getattr(self, "_logged_missing_manifest", False):
+                    _LOGGER.info(
+                        "NUBLY HA: board=%s is registered but the firmware "
+                        "manifest has no entry for it yet (device=%s name=%r "
+                        "manifest_boards=%s) — Update entity has no available "
+                        "version; runtime config publish is unaffected.",
+                        board,
+                        self._device_id,
+                        self._device_name(),
+                        manifest_boards,
+                    )
+                    self._logged_missing_manifest = True
+            else:
+                _LOGGER.warning(
+                    "NUBLY HA: no firmware entries for board=%s (device=%s "
+                    "name=%r). Manifest boards: %s",
+                    board,
+                    self._device_id,
+                    self._device_name(),
+                    manifest_boards,
+                )
         else:
             _LOGGER.debug(
                 "NUBLY HA: latest_version device=%s name=%r board=%s "

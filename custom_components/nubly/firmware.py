@@ -203,12 +203,29 @@ class NublyFirmwareProvider(DataUpdateCoordinator[dict]):
                 "or in the latest GitHub release"
             )
 
+        manifest_boards = (
+            sorted((manifest.get("boards") or {}).keys())
+            if isinstance(manifest.get("boards"), dict)
+            else None
+        )
+        _LOGGER.info(
+            "NUBLY HA: OTA manifest resolved boards=%s integration_supports=%s",
+            manifest_boards,
+            sorted(SUPPORTED_BOARDS),
+        )
+        if manifest_boards is not None:
+            missing = sorted(set(SUPPORTED_BOARDS) - set(manifest_boards))
+            if missing:
+                _LOGGER.info(
+                    "NUBLY HA: OTA manifest has no entry for boards=%s — "
+                    "no firmware available for them yet (runtime config "
+                    "is not affected)",
+                    missing,
+                )
         _LOGGER.debug(
             "NUBLY HA: manifest top-level keys=%s, boards=%s",
             sorted(manifest.keys()),
-            sorted((manifest.get("boards") or {}).keys())
-            if isinstance(manifest.get("boards"), dict)
-            else None,
+            manifest_boards,
         )
 
         return {

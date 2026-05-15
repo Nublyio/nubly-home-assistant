@@ -42,7 +42,19 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     _register_cover_art_view(hass)
     await _async_check_provisioning_once(hass)
     _register_services(hass)
+    _log_board_registry()
     return True
+
+
+def _log_board_registry() -> None:
+    """Log every board type the integration knows about, once."""
+    # Local import to avoid a startup-time cycle.
+    from .firmware import BOARD_CAPABILITIES, SUPPORTED_BOARDS
+
+    _LOGGER.info(
+        "NUBLY HA: registered boards = %s",
+        {b: BOARD_CAPABILITIES.get(b, {}) for b in sorted(SUPPORTED_BOARDS)},
+    )
 
 
 def _register_services(hass: HomeAssistant) -> None:
