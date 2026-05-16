@@ -78,6 +78,14 @@ class NublyCoverArtView(HomeAssistantView):
 
         entry = _find_entry_by_device_id(self.hass, device_id)
         if entry is None and not query_pic:
+            known = _known_device_ids(self.hass)
+            _LOGGER.warning(
+                "NUBLY HA: cover art 404 unknown_device requested=%s "
+                "known_device_ids=%s known_entries=%d",
+                device_id,
+                known,
+                len(known),
+            )
             return _err(404, "unknown_device")
 
         # Resolve board for output sizing.
@@ -100,11 +108,14 @@ class NublyCoverArtView(HomeAssistantView):
             device_id,
         )
 
-        media_entity = (
-            query_entity
-            or (entry.data.get(CONF_MEDIA_ENTITY) if entry else None)
+        # Resolve the media_player entity. Priority:
+        #   1. ?entity= query override
+        #   2. structured config screens.media.entity_id (post-refactor)
+        #   3. legacy flat entry.data[CONF_MEDIA_ENTITY] (pre-refactor entries)
+        media_entity = query_entity or self._resolve_media_entity(entry)
+        _LOGGER.debug(
+            "NUBLY HA: cover art resolved entity=%s device=%s", media_entity, device_id
         )
-        _LOGGER.debug("NUBLY HA: cover art resolved entity=%s", media_entity)
 
         # ETag from upstream picture + title + content_id + board + cache.
         # Including bounds means a device whose board changes (HW swap)
@@ -179,6 +190,14 @@ class NublyCoverArtView(HomeAssistantView):
                 )
             else:
                 if not media_entity:
+                    _LOGGER.warning(
+                        "NUBLY HA: cover art 404 no_media_entity device=%s "
+                        "board=%s entry=%s — no media_player in structured "
+                        "config, options, or entry data",
+                        device_id,
+                        board,
+                        entry.entry_id if entry else None,
+                    )
                     return _err(404, "no_media_entity")
                 image_bytes, upstream_ct = await self._fetch_via_player(
                     media_entity
@@ -324,6 +343,46 @@ class NublyCoverArtView(HomeAssistantView):
             configured = entry.data.get(CONF_MODEL)
             if isinstance(configured, str):
                 return normalize_board(configured)
+        return None
+
+    def _resolve_media_entity(self, entry: ConfigEntry | None) -> str | None:
+        """Resolve the configured media_player for a device.
+
+        Order (board-agnostic — works for round_1_43 and lcd_5 alike):
+          1. structured config in the per-entry bucket
+             (screens.media.entity_id) — the post-refactor location
+          2. structured config inside entry.options[CONF_CONFIG]
+             (covers a not-yet-loaded bucket)
+          3. legacy flat entry.data[CONF_MEDIA_ENTITY] / entry.options
+             for pre-refactor entries
+        """
+        if entry is None:
+            return None
+
+        # 1. Live bucket structured config.
+        bucket = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if isinstance(bucket, dict):
+            structured = bucket.get("structured")
+            if isinstance(structured, dict):
+                media = (structured.get("screens") or {}).get("media") or {}
+                eid = (media.get("entity_id") or "").strip()
+                if eid:
+                    return eid
+
+        # 2. Structured config persisted in options.
+        cfg = entry.options.get("config")
+        if isinstance(cfg, dict):
+            media = (cfg.get("screens") or {}).get("media") or {}
+            eid = (media.get("entity_id") or "").strip()
+            if eid:
+                return eid
+
+        # 3. Legacy flat key (pre-refactor entries kept their flat data).
+        legacy = entry.data.get(CONF_MEDIA_ENTITY) or entry.options.get(
+            CONF_MEDIA_ENTITY
+        )
+        if isinstance(legacy, str) and legacy.strip():
+            return legacy.strip()
         return None
 
     async def _fetch_via_player(
@@ -503,3 +562,12 @@ def _find_entry_by_device_id(hass: HomeAssistant, device_id: str):
         if entry.data.get(CONF_DEVICE_ID) == device_id:
             return entry
     return None
+
+
+def _known_device_ids(hass: HomeAssistant) -> list[str]:
+    """All configured Nubly device_ids — used for 404 diagnostics."""
+    return sorted(
+        str(entry.data.get(CONF_DEVICE_ID))
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        if entry.data.get(CONF_DEVICE_ID)
+    )
